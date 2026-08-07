@@ -1,0 +1,93 @@
+export type ProviderId = 'claude' | 'codex';
+
+export interface StoredAccount {
+  id: string;
+  provider: ProviderId;
+  label: string;
+  enabled: boolean;
+  priority: number | null;
+  credentialId: string;
+  createdAt: string;
+}
+
+export interface OAuthCredential {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number | null;
+  accountId: string;
+}
+
+export interface TeamAIConfig {
+  version: 1;
+  proxy: { host: string; claudePort: number; codexPort: number; clientToken: string };
+  switchThreshold: number;
+  maxConcurrentPerAccount: number;
+  accounts: StoredAccount[];
+}
+
+export interface QuotaWindow {
+  usage: number | null;
+  resetsAt: number | null;
+}
+
+export interface QuotaSnapshot {
+  routingUsage: number | null;
+  routingResetsAt: number | null;
+  windows: Record<string, QuotaWindow>;
+}
+
+export interface SubscriptionProfile {
+  status: string | null;
+  createdAt: string | null;
+  rateLimitTier: string | null;
+  orgType: string | null;
+  hasClaudeMax: boolean | null;
+  hasClaudePro: boolean | null;
+  fetchedAt: number;
+}
+
+export interface AccountRuntimeState {
+  usage: number | null;
+  resetsAt: number | null;
+  windows?: Record<string, QuotaWindow>;
+  profile?: SubscriptionProfile | null;
+  cooldownUntil: number | null;
+  lastUsed: number | null;
+  error: string | null;
+}
+
+export interface PersistedState {
+  version: 1;
+  accounts: Record<string, AccountRuntimeState>;
+  events?: Array<{ at: number; message: string }>;
+}
+
+export interface RuntimeAccount extends StoredAccount {
+  credential: OAuthCredential;
+  usage: number | null;
+  resetsAt: number | null;
+  cooldownUntil: number | null;
+  lastUsed: number | null;
+  error: string | null;
+  windows: Record<string, QuotaWindow>;
+  profile: SubscriptionProfile | null;
+  inflight: number;
+}
+
+export interface FailureDecision {
+  kind: 'quota' | 'auth' | 'forbidden' | 'transient' | 'fatal';
+  retryAfterMs: number;
+}
+
+export interface Provider {
+  id: ProviderId;
+  label: string;
+  upstreamBase: string;
+  normalizePath(path: string): string | null;
+  buildHeaders(incoming: Headers, account: RuntimeAccount): Headers;
+  rewriteBody(body: Buffer, account: RuntimeAccount): Buffer;
+  readQuota(headers: Headers, body?: string): QuotaSnapshot | null;
+  classifyFailure(status: number, headers: Headers, body: string): FailureDecision;
+  refresh(credential: OAuthCredential): Promise<OAuthCredential>;
+  fetchProfile?(credential: OAuthCredential): Promise<SubscriptionProfile>;
+}
