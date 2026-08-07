@@ -1,0 +1,104 @@
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { loginClaude, loginCodex } from './auth.js';
+import { runningPid } from './runtime.js';
+import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
+import type { StoredAccount, SubscriptionProfile } from './types.js';
+
+const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
+const color = (code: number, text: string): string => `${ESC}${code}m${text}${RESET}`;
+const visible = (text: string): number => text.replace(ANSI, '').length;
+const fit = (text: string, width: number): string => { const plain = text.replace(ANSI, ''); if (plain.length > width) return `${plain.slice(0, Math.max(0, width - 1))}…`; return text + ' '.repeat(Math.max(0, width - visible(text))); };
+
+function duration(reset: number | null | undefined): string {
+  if (!reset || reset <= Date.now()) return '';
+  const mins = Math.ceil((reset - Date.now()) / 60_000); if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60); if (hours < 24) return `${hours}h${mins % 60 ? `${mins % 60}m` : ''}`;
+  return `${Math.floor(hours / 24)}d${hours % 24 ? `${hours % 24}h` : ''}`;
+}
+
+function bar(usage: number | null | undefined, reset: number | null | undefined, width: number): string {
+  const remaining = duration(reset); const ratio = usage == null ? null : Math.max(0, Math.min(1, usage));
+  const label = ratio == null ? (remaining || '-') : `${Math.round(ratio * 100)}%${remaining && `${Math.round(ratio * 100)}% ${remaining}`.length <= width ? ` ${remaining}` : ''}`;
+  const text = label.slice(0, width).padStart(Math.floor((width + label.length) / 2)).padEnd(width);
+  if (ratio == null) return `${ESC}100;37m${text}${RESET}`;
+  const filled = Math.round(ratio * width); const bg = ratio >= 0.9 ? 41 : ratio >= 0.7 ? 43 : 42;
+  return `${ESC}${bg};97m${text.slice(0, filled)}${ESC}100;37m${text.slice(filled)}${RESET}`;
+}
+
+function healthy(profile: SubscriptionProfile | null | undefined): boolean { return !profile?.status || ['active', 'trialing'].includes(profile.status); }
+function tier(profile: SubscriptionProfile | null | undefined): string {
+  if (!profile) return 'OAuth'; const match = /(\d+x)$/i.exec(profile.rateLimitTier || '');
+  if (match) return `Max ${match[1]}`; if (profile.hasClaudeMax || profile.orgType === 'claude_max') return 'Max'; if (profile.hasClaudePro || profile.orgType === 'claude_pro') return 'Pro'; return 'OAuth';
+}
+function renewal(profile: SubscriptionProfile | null | undefined): string {
+  if (!profile?.createdAt || !healthy(profile)) return '—'; const created = new Date(profile.createdAt); if (!Number.isFinite(created.getTime())) return '—';
+  const now = new Date(); const day = created.getDate(); const build = (year: number, month: number): Date => new Date(year, month, Math.min(day, new Date(year, month + 1, 0).getDate())); let target = build(now.getFullYear(), now.getMonth()); if (target < new Date(now.getFullYear(), now.getMonth(), now.getDate())) target = build(now.getFullYear(), now.getMonth() + 1);
+  const left = Math.round((target.getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000); return left <= 0 ? 'D-DAY' : `D-${left}`;
+}
+
+export async function runTui(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
+  let selectedId: string | null = null; let mode: 'normal' | 'order' | 'delete' | 'add' = 'normal'; let message = ''; let busy = false; let closed = false;
+  const rows = async (): Promise<StoredAccount[]> => (await loadConfig()).accounts;
+  const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
+
+  const render = async (): Promise<void> => {
+    const config = await loadConfig(); const state = await loadState(); const accounts = config.accounts; const current = selected(accounts); if (current && !selectedId) selectedId = current.credentialId;
+    const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40); const barWidth = width >= 120 ? 18 : 12; const lines: string[] = [];
+    lines.push(color(1, ' TeamAI')); lines.push('─'.repeat(width));
+    for (const provider of ['claude', 'codex'] as const) {
+      const group = accounts.filter((account) => account.provider === provider); if (!group.length) continue;
+      lines.push(color(36, provider === 'claude' ? ' Claude' : ' Codex'));
+      for (const account of group) {
+        const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
+        const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : 'ChatGPT';
+        const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
+        if (provider === 'claude') {
+          const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
+          lines.push(`${head} Ses ${bar(session?.usage, session?.resetsAt, barWidth)} Wk ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} Fbl ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored}`);
+        } else {
+          const primary = saved?.windows?.primary || saved?.windows?.requests; const secondary = saved?.windows?.secondary;
+          lines.push(`${head} Pri ${bar(primary?.usage, primary?.resetsAt, barWidth)} Sec ${bar(secondary?.usage, secondary?.resetsAt, barWidth)} ${profile?.status || ''}`);
+        }
+      }
+    }
+    const activityRows = Math.max(4, height - lines.length - 5); lines.push(''); lines.push(` Activity ${'─'.repeat(Math.max(0, width - 10))}`);
+    for (const event of [...(state.events || [])].reverse().slice(0, activityRows)) lines.push(`${color(90, new Date(event.at).toLocaleTimeString('en-GB'))} ${event.message}`);
+    while (lines.length < height - 2) lines.push(''); lines.push('─'.repeat(width));
+    const footer = mode === 'normal' ? ' ↑↓ select   s switch   e enable/disable   o order   d delete   a add   R Reload   q quit' : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: c Claude login   x Codex login   Esc cancel';
+    lines.push(fit(`${footer}${message ? `   ${message}` : ''}`, width)); process.stdout.write(`${ESC}H${lines.slice(0, height).map((line) => fit(line, width)).join('\n')}`);
+  };
+
+  const move = async (delta: number): Promise<void> => { const accounts = await rows(); const index = Math.max(0, accounts.findIndex((a) => a.credentialId === selectedId)); selectedId = accounts[Math.min(accounts.length - 1, Math.max(0, index + delta))]?.credentialId || null; };
+  const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const config = await loadConfig(); const account = selected(config.accounts); if (!account) return; fn(account, config.accounts); await saveConfig(config); await restartDaemon(); };
+  const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
+
+  process.stdout.write(`${ESC}?1049h${ESC}?25l`); process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.setEncoding('utf8'); await render(); const timer = setInterval(() => void render(), 500);
+  await new Promise<void>((resolve) => process.stdin.on('data', async (key: string) => {
+    if (busy) return; message = '';
+    if (key === '\u0003' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
+    if (key === '\x1b') mode = 'normal';
+    else if (mode === 'add') { if (key === 'c') await add('claude'); else if (key === 'x') await add('codex'); }
+    else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; message = `Deleted ${account.label}`; await restartDaemon(); } mode = 'normal'; } }
+    else if (mode === 'order') {
+      if (key === 'a' || key === 'c') { await mutate((account) => { account.priority = null; }); }
+      else if (key === '\x1b[A' || key === 'k') await mutate((account) => { account.priority = Math.max(1, (account.priority ?? 2) - 1); });
+      else if (key === '\x1b[B' || key === 'j') await mutate((account) => { account.priority = (account.priority ?? 0) + 1; });
+      else if (key === '\r') mode = 'normal';
+    } else {
+      if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
+      else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
+      else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
+      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await restartDaemon(); message = 'Server reloaded; profile refresh scheduled'; }
+    }
+    await render();
+  }));
+  clearInterval(timer); if (closed) { process.stdin.setRawMode(false); process.stdin.pause(); process.stdout.write(`${ESC}?25h${ESC}?1049l`); }
+}
+
+async function restartDaemon(): Promise<void> {
+  const pid = await runningPid(); if (pid) { try { process.kill(pid, 'SIGTERM'); } catch { /* stale */ } for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((resolve) => setTimeout(resolve, 100)); }
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url)); const child = spawn(process.execPath, [cli, 'server'], { detached: true, stdio: 'ignore', env: process.env }); child.unref();
+  for (let i = 0; i < 30 && !(await runningPid()); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+}
