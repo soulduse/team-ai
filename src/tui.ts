@@ -46,10 +46,13 @@ export async function runTui(): Promise<void> {
   const render = async (): Promise<void> => {
     const config = await loadConfig(); const state = await loadState(); const accounts = config.accounts; const current = selected(accounts); if (current && !selectedId) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40); const barWidth = width >= 120 ? 18 : 12; const lines: string[] = [];
-    lines.push(color(1, ' TeamAI')); lines.push('─'.repeat(width));
+    const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
+    const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
+    lines.push(`${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`); lines.push('━'.repeat(width));
     for (const provider of ['claude', 'codex'] as const) {
       const group = accounts.filter((account) => account.provider === provider); if (!group.length) continue;
-      lines.push(color(36, provider === 'claude' ? ' Claude' : ' Codex'));
+      const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;
+      lines.push(color(36, `┌─${sectionTitle}${'─'.repeat(Math.max(0, width - sectionTitle.length - 3))}┐`));
       for (const account of group) {
         const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
         const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : 'ChatGPT';
@@ -62,6 +65,7 @@ export async function runTui(): Promise<void> {
           lines.push(`${head} Pri ${bar(primary?.usage, primary?.resetsAt, barWidth)} Sec ${bar(secondary?.usage, secondary?.resetsAt, barWidth)} ${profile?.status || ''}`);
         }
       }
+      lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
     }
     const activityRows = Math.max(4, height - lines.length - 5); lines.push(''); lines.push(` Activity ${'─'.repeat(Math.max(0, width - 10))}`);
     for (const event of [...(state.events || [])].reverse().slice(0, activityRows)) lines.push(`${color(90, new Date(event.at).toLocaleTimeString('en-GB'))} ${event.message}`);

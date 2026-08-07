@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile, lstat, symlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
@@ -11,7 +11,8 @@ import { loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
 import type { ProviderId } from './types.js';
 
-const [command = 'help', ...args] = process.argv.slice(2);
+const invokedAs = basename(process.argv[1] || 'teamai');
+const [command = invokedAs === 'tai' ? 'start' : 'help', ...args] = process.argv.slice(2);
 
 function provider(value?: string): ProviderId { if (value !== 'claude' && value !== 'codex') throw new Error('Provider must be claude or codex'); return value; }
 function flag(name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
@@ -90,6 +91,7 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
 function help(): void { console.log(`TeamAI — multi-account relay for Claude Code and Codex CLI
 
 Usage:
+  tai                                  Open the TeamAI dashboard
   teamai login [claude|codex]
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
