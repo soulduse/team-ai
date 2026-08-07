@@ -28,6 +28,8 @@ teamai start
 
 `login` asks whether to add `[1] Claude` or `[2] Codex`. Repeat it for additional accounts. `start` launches the local relay and opens the dashboard; from the TUI press `1` to launch Claude Code or `2` to launch Codex. When the client exits, the dashboard returns.
 
+Codex uses its normal browser login flow. TeamAI does not require ChatGPT's optional device-code authentication setting to be enabled.
+
 Credential import is optional and only works when an exportable credential file exists:
 
 ```bash

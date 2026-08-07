@@ -74,7 +74,7 @@ export async function loginClaude(): Promise<{ label: string; credential: OAuthC
 export async function loginCodex(): Promise<{ label: string; credential: OAuthCredential }> {
   const home = await mkdtemp(join(tmpdir(), 'teamai-codex-login-'));
   try {
-    const exit = await new Promise<number>((resolveExit, reject) => { const child = spawn('codex', ['login', '--device-auth'], { stdio: 'inherit', env: { ...process.env, CODEX_HOME: home } }); child.once('error', reject); child.once('exit', (code) => resolveExit(code ?? 1)); });
+    const exit = await new Promise<number>((resolveExit, reject) => { const child = spawn('codex', ['login'], { stdio: 'inherit', env: { ...process.env, CODEX_HOME: home } }); child.once('error', reject); child.once('exit', (code) => resolveExit(code ?? 1)); });
     if (exit !== 0) throw new Error(`codex login exited with ${exit}`);
     return (await importAuth('codex', join(home, 'auth.json')))[0]!;
   } finally { await rm(home, { recursive: true, force: true }); }
