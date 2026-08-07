@@ -37,6 +37,7 @@ tax                   # Codex through the TeamAI account pool
 tax resume            # same as: teamai codex resume
 teamai claude         # long form of tac
 teamai codex          # long form of tax
+teamai session        # choose [1] Claude or [2] Codex interactively
 ```
 
 The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.

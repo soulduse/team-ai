@@ -21,7 +21,7 @@ function flag(name: string): string | undefined { const index = args.indexOf(nam
 
 async function main(): Promise<void> {
   switch (command) {
-    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider(); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
+    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider('Login provider'); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
     case 'import': { const id = provider(args[0]); const results = await importAuth(id, flag('--from')); for (const result of results) { const account = await upsertAccount(id, result.label, result.credential); console.log(`Imported ${id} account: ${account.label}`); } break; }
     case 'accounts': await accounts(args[0] ? provider(args[0]) : undefined); break;
     case 'enable': await toggle(true); break;
@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     case 'status': await status(); break;
     case 'stop': await stop(); break;
     case 'restart': await stop(true); await ensureServer(); await runTui(); break;
+    case 'session': await runClient(await selectProvider('Select session'), args.filter((x) => x !== '--')); break;
     case 'claude': await runClient('claude', args.filter((x) => x !== '--')); break;
     case 'codex': await runClient('codex', args.filter((x) => x !== '--')); break;
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
@@ -41,11 +42,11 @@ async function main(): Promise<void> {
   }
 }
 
-async function selectProvider(): Promise<ProviderId> {
-  if (!process.stdin.isTTY) throw new Error('Use teamai login <claude|codex> in a non-interactive shell');
+async function selectProvider(promptLabel: string): Promise<ProviderId> {
+  if (!process.stdin.isTTY) throw new Error('Specify claude or codex explicitly in a non-interactive shell');
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await prompt.question('Login provider — [1] Claude, [2] Codex: ')).trim().toLowerCase();
+    const answer = (await prompt.question(`${promptLabel} — [1] Claude, [2] Codex: `)).trim().toLowerCase();
     if (answer === '1' || answer === 'c' || answer === 'claude') return 'claude';
     if (answer === '2' || answer === 'x' || answer === 'codex') return 'codex';
     throw new Error('Choose 1 for Claude or 2 for Codex');
@@ -100,6 +101,7 @@ Usage:
   tax [CODEX_ARGS...]                  Start a relayed Codex session
   teamai claude [CLAUDE_ARGS...]       Start a relayed Claude Code session
   teamai codex [CODEX_ARGS...]         Start a relayed Codex session
+  teamai session [CLIENT_ARGS...]      Choose Claude or Codex interactively
   teamai login [claude|codex]
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
