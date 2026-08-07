@@ -66,7 +66,7 @@ export async function runTui(): Promise<void> {
     const activityRows = Math.max(4, height - lines.length - 5); lines.push(''); lines.push(` Activity ${'─'.repeat(Math.max(0, width - 10))}`);
     for (const event of [...(state.events || [])].reverse().slice(0, activityRows)) lines.push(`${color(90, new Date(event.at).toLocaleTimeString('en-GB'))} ${event.message}`);
     while (lines.length < height - 2) lines.push(''); lines.push('─'.repeat(width));
-    const footer = mode === 'normal' ? ' C Claude   X Codex   ↑↓ select   s switch   e enable   o order   d delete   a add   R Reload   q quit' : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: c Claude login   x Codex login   Esc cancel';
+    const footer = mode === 'normal' ? ' 1 Claude   2 Codex   ↑↓ select   s switch   e enable   o order   d delete   a add   R Reload   q quit' : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
     lines.push(fit(`${footer}${message ? `   ${message}` : ''}`, width)); process.stdout.write(`${ESC}H${lines.slice(0, height).map((line) => fit(line, width)).join('\n')}`);
   };
 
@@ -84,7 +84,7 @@ export async function runTui(): Promise<void> {
     if (busy) return; message = '';
     if (key === '\u0003' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
     if (key === '\x1b') mode = 'normal';
-    else if (mode === 'add') { if (key === 'c') await add('claude'); else if (key === 'x') await add('codex'); }
+    else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); }
     else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; message = `Deleted ${account.label}`; await restartDaemon(); } mode = 'normal'; } }
     else if (mode === 'order') {
       if (key === 'a' || key === 'c') { await mutate((account) => { account.priority = null; }); }
@@ -95,7 +95,7 @@ export async function runTui(): Promise<void> {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
-      else if (key === 'C') await launch('claude'); else if (key === 'X') await launch('codex');
+      else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
       else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await restartDaemon(); message = 'Server reloaded; profile refresh scheduled'; }
     }
     await render();

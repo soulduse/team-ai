@@ -40,10 +40,10 @@ async function selectProvider(): Promise<ProviderId> {
   if (!process.stdin.isTTY) throw new Error('Use teamai login <claude|codex> in a non-interactive shell');
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await prompt.question('Login provider — [c] Claude, [x] Codex: ')).trim().toLowerCase();
-    if (answer === 'c' || answer === 'claude') return 'claude';
-    if (answer === 'x' || answer === 'codex') return 'codex';
-    throw new Error('Choose c for Claude or x for Codex');
+    const answer = (await prompt.question('Login provider — [1] Claude, [2] Codex: ')).trim().toLowerCase();
+    if (answer === '1' || answer === 'c' || answer === 'claude') return 'claude';
+    if (answer === '2' || answer === 'x' || answer === 'codex') return 'codex';
+    throw new Error('Choose 1 for Claude or 2 for Codex');
   } finally { prompt.close(); }
 }
 
@@ -97,6 +97,6 @@ Usage:
   teamai enable|disable <provider> <account>
   teamai priority <provider> <account> <rank|auto>
 
-Run "teamai start", then press C for Claude Code or X for Codex.`); }
+Run "teamai start", then press 1 for Claude Code or 2 for Codex.`); }
 
 main().catch((error) => { console.error(`teamai: ${(error as Error).message}`); process.exitCode = 1; });

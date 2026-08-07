@@ -26,7 +26,7 @@ teamai login
 teamai start
 ```
 
-`login` asks whether to add a Claude or Codex account. Repeat it for additional accounts. `start` launches the local relay and opens the dashboard; from the TUI press uppercase `C` to launch Claude Code or uppercase `X` to launch Codex. When the client exits, the dashboard returns.
+`login` asks whether to add `[1] Claude` or `[2] Codex`. Repeat it for additional accounts. `start` launches the local relay and opens the dashboard; from the TUI press `1` to launch Claude Code or `2` to launch Codex. When the client exits, the dashboard returns.
 
 Credential import is optional and only works when an exportable credential file exists:
 
