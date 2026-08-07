@@ -32,9 +32,11 @@ For a direct provider session, use the dedicated launchers. They automatically s
 
 ```bash
 tac                   # Claude Code through the TeamAI account pool
-tac --resume          # same as: teamai run claude -- --resume
+tac --resume          # same as: teamai claude --resume
 tax                   # Codex through the TeamAI account pool
-tax resume            # same as: teamai run codex -- resume
+tax resume            # same as: teamai codex resume
+teamai claude         # long form of tac
+teamai codex          # long form of tax
 ```
 
 The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.

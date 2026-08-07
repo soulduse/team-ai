@@ -32,6 +32,8 @@ async function main(): Promise<void> {
     case 'status': await status(); break;
     case 'stop': await stop(); break;
     case 'restart': await stop(true); await ensureServer(); await runTui(); break;
+    case 'claude': await runClient('claude', args.filter((x) => x !== '--')); break;
+    case 'codex': await runClient('codex', args.filter((x) => x !== '--')); break;
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
     case 'tui': await runTui(); break;
     case 'help': case '--help': case '-h': help(); break;
@@ -96,6 +98,8 @@ Usage:
   tai                                  Open the TeamAI dashboard
   tac [CLAUDE_ARGS...]                 Start a relayed Claude Code session
   tax [CODEX_ARGS...]                  Start a relayed Codex session
+  teamai claude [CLAUDE_ARGS...]       Start a relayed Claude Code session
+  teamai codex [CODEX_ARGS...]         Start a relayed Codex session
   teamai login [claude|codex]
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
