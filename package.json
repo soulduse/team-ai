@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "description": "Multi-account relay for Claude Code and Codex CLI",
   "type": "module",
-  "bin": { "teamai": "dist/src/cli.js", "tai": "dist/src/cli.js" },
+  "bin": {
+    "teamai": "dist/src/cli.js",
+    "tai": "dist/src/cli.js",
+    "tac": "dist/src/cli.js",
+    "tax": "dist/src/cli.js"
+  },
   "files": ["dist/src", "LICENSE", "NOTICE", "README.md", "SECURITY.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -28,6 +28,17 @@ tai
 
 `login` asks whether to add `[1] Claude` or `[2] Codex`. Repeat it for additional accounts. `tai` is the short session command and is equivalent to `teamai start`: it launches the local relay and opens the dashboard. From the TUI press `1` to launch Claude Code or `2` to launch Codex. When the client exits, the dashboard returns.
 
+For a direct provider session, use the dedicated launchers. They automatically start the TeamAI relay when necessary and pass every trailing argument to the official client:
+
+```bash
+tac                   # Claude Code through the TeamAI account pool
+tac --resume          # same as: teamai run claude -- --resume
+tax                   # Codex through the TeamAI account pool
+tax resume            # same as: teamai run codex -- resume
+```
+
+The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.
+
 Codex uses its normal browser login flow. TeamAI does not require ChatGPT's optional device-code authentication setting to be enabled.
 
 Credential import is optional and only works when an exportable credential file exists:

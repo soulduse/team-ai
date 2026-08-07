@@ -12,7 +12,9 @@ import { runTui } from './tui.js';
 import type { ProviderId } from './types.js';
 
 const invokedAs = basename(process.argv[1] || 'teamai');
-const [command = invokedAs === 'tai' ? 'start' : 'help', ...args] = process.argv.slice(2);
+const inputArgs = process.argv.slice(2);
+const invocation = invokedAs === 'tai' ? ['start', ...inputArgs] : invokedAs === 'tac' ? ['run', 'claude', ...inputArgs] : invokedAs === 'tax' ? ['run', 'codex', ...inputArgs] : inputArgs;
+const [command = 'help', ...args] = invocation;
 
 function provider(value?: string): ProviderId { if (value !== 'claude' && value !== 'codex') throw new Error('Provider must be claude or codex'); return value; }
 function flag(name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
@@ -92,6 +94,8 @@ function help(): void { console.log(`TeamAI — multi-account relay for Claude C
 
 Usage:
   tai                                  Open the TeamAI dashboard
+  tac [CLAUDE_ARGS...]                 Start a relayed Claude Code session
+  tax [CODEX_ARGS...]                  Start a relayed Codex session
   teamai login [claude|codex]
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
