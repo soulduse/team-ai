@@ -13,7 +13,13 @@ function stringAt(value: unknown, key: string): string | null { return value && 
 
 export async function importAuth(provider: ProviderId, from?: string): Promise<Array<{ label: string; credential: OAuthCredential }>> {
   const path = expand(from || (provider === 'claude' ? '~/.claude/.credentials.json' : join(process.env.CODEX_HOME || '~/.codex', 'auth.json')));
-  const raw = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  let contents: string;
+  try { contents = await readFile(path, 'utf8'); }
+  catch (error) {
+    if (!from && (error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`No reusable ${provider} credential file was found. Run "teamai login" instead.`);
+    throw error;
+  }
+  const raw = JSON.parse(contents) as Record<string, unknown>;
   if (provider === 'claude') {
     if (Array.isArray(raw.accounts)) {
       const accounts = raw.accounts.flatMap((entry) => {

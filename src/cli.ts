@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile, lstat, symlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { runServer, runningPid } from './runtime.js';
@@ -17,21 +18,33 @@ function flag(name: string): string | undefined { const index = args.indexOf(nam
 
 async function main(): Promise<void> {
   switch (command) {
-    case 'login': { const id = provider(args[0]); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
+    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider(); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
     case 'import': { const id = provider(args[0]); const results = await importAuth(id, flag('--from')); for (const result of results) { const account = await upsertAccount(id, result.label, result.credential); console.log(`Imported ${id} account: ${account.label}`); } break; }
     case 'accounts': await accounts(args[0] ? provider(args[0]) : undefined); break;
     case 'enable': await toggle(true); break;
     case 'disable': await toggle(false); break;
     case 'priority': await priority(); break;
     case 'server': await runServer(); break;
+    case 'start': await ensureServer(); await runTui(); break;
     case 'status': await status(); break;
     case 'stop': await stop(); break;
-    case 'restart': await stop(true); await runServer(); break;
+    case 'restart': await stop(true); await ensureServer(); await runTui(); break;
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
     case 'tui': await runTui(); break;
     case 'help': case '--help': case '-h': help(); break;
     default: throw new Error(`Unknown command: ${command}`);
   }
+}
+
+async function selectProvider(): Promise<ProviderId> {
+  if (!process.stdin.isTTY) throw new Error('Use teamai login <claude|codex> in a non-interactive shell');
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await prompt.question('Login provider — [c] Claude, [x] Codex: ')).trim().toLowerCase();
+    if (answer === 'c' || answer === 'claude') return 'claude';
+    if (answer === 'x' || answer === 'codex') return 'codex';
+    throw new Error('Choose c for Claude or x for Codex');
+  } finally { prompt.close(); }
 }
 
 async function accounts(filter?: ProviderId): Promise<void> {
@@ -77,12 +90,13 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
 function help(): void { console.log(`TeamAI — multi-account relay for Claude Code and Codex CLI
 
 Usage:
-  teamai login <claude|codex>
+  teamai login [claude|codex]
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
-  teamai run <claude|codex> [-- CLIENT_ARGS...]
-  teamai server|status|stop|restart|tui
+  teamai start|restart|status|stop
   teamai enable|disable <provider> <account>
-  teamai priority <provider> <account> <rank|auto>`); }
+  teamai priority <provider> <account> <rank|auto>
+
+Run "teamai start", then press C for Claude Code or X for Codex.`); }
 
 main().catch((error) => { console.error(`teamai: ${(error as Error).message}`); process.exitCode = 1; });
