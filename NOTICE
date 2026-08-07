@@ -1,0 +1,13 @@
+TeamAI
+Copyright (c) 2026 TeamAI contributors
+
+Portions of the account selection, retry, proxy, and Anthropic OAuth design are
+derived from TeamClaude, Copyright (c) KarpelesLab contributors, MIT License:
+https://github.com/KarpelesLab/teamclaude
+
+The Codex OAuth and Responses relay design was informed by codex-multi-auth,
+Copyright its contributors, MIT License:
+https://github.com/ndycode/codex-multi-auth
+
+Claude, Anthropic, ChatGPT, Codex, and OpenAI are trademarks of their respective
+owners. TeamAI is not affiliated with or endorsed by those owners.
