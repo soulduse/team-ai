@@ -33,6 +33,9 @@ function codexPlan(profile: SubscriptionProfile | null | undefined): string {
   const raw = profile?.rateLimitTier;
   if (!raw) return 'ChatGPT';
   const names: Record<string, string> = { pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', business: 'Business', enterprise: 'Enterprise', free: 'Free' };
+  // ChatGPT exposes no Max-style multiplier anywhere — not in the token claims
+  // and not in a response header that arrives reliably — so the plan name is
+  // the whole of what can be shown here.
   return names[raw.toLowerCase()] || raw;
 }
 function tier(profile: SubscriptionProfile | null | undefined): string {
@@ -94,10 +97,11 @@ export async function runTui(): Promise<void> {
       const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
       const response = await fetch(`http://${config.proxy.host}:${port}/probe`, { headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(90_000) });
       if (!response.ok) throw new Error(`control ${response.status}`);
-      const result = await response.json() as { targets: number; measured: number; ready: boolean };
+      const result = await response.json() as { targets: number; measured: number; ready: boolean; added: number; removed: number };
+      const fleet = [result.added ? `+${result.added}` : '', result.removed ? `-${result.removed}` : ''].filter(Boolean).join(' ');
       message = !result.ready
         ? 'No probe template yet — run one request through the proxy first'
-        : `Re-measured ${result.measured}/${result.targets} account(s)`;
+        : `Re-measured ${result.measured}/${result.targets} account(s)${fleet ? ` (${fleet})` : ''}`;
     } catch (error) { message = `Re-measure failed: ${(error as Error).message}`; }
     finally { busy = false; }
   };

@@ -32,12 +32,22 @@ export async function runServer(): Promise<void> {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
     if (!secureEqual(token, config.proxy.clientToken)) { res.writeHead(401).end('{}'); return; }
     if (!req.url?.startsWith('/probe')) { res.writeHead(404).end('{}'); return; }
+    // Pick up accounts added or removed by the TUI (a separate process) before
+    // measuring, so `R` reflects the current fleet without a server restart.
+    const [latestConfig, latestCredentials] = await Promise.all([loadConfig(), loadCredentials()]);
+    const changes = pools.map((p) => p.sync(latestConfig.accounts, latestCredentials)).reduce((a, b) => ({ added: a.added + b.added, removed: a.removed + b.removed }), { added: 0, removed: 0 });
+    if (changes.added || changes.removed) {
+      persist(`Fleet updated: ${changes.added} added, ${changes.removed} removed`);
+      // A new account has no profile yet; fill it so its plan renders with its
+      // first measurement rather than one refresh cycle later.
+      await Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0)));
+    }
     const results = await Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll()));
     const total = results.reduce((acc, r) => ({ targets: acc.targets + r.targets, measured: acc.measured + r.measured }), { targets: 0, measured: 0 });
     const ready = pools.some((p) => p.hasProbe());
     if (total.targets) persist(`Quota re-measure: ${total.measured}/${total.targets} account(s)`);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ...total, ready }));
+    res.end(JSON.stringify({ ...total, ready, ...changes }));
   });
   await new Promise<void>((resolve, reject) => { control.once('error', reject); control.listen(config.proxy.controlPort ?? config.proxy.claudePort + 100, config.proxy.host, () => { control.removeListener('error', reject); resolve(); }); });
   servers.push(control);

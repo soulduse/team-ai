@@ -54,6 +54,37 @@ export class AccountPool {
     return promise;
   }
 
+  // Absorb config/credential changes made by another process (the TUI writes
+  // accounts to disk, the server holds the pools) so a re-measure picks up a
+  // newly added account instead of requiring a restart. Live runtime state —
+  // usage, cooldowns, inflight, affinity — is preserved for accounts that stay;
+  // only genuinely new ones are built fresh, and removed ones drop out. An
+  // account with a request in flight is never dropped mid-response.
+  sync(stored: StoredAccount[], credentials: Record<string, OAuthCredential>): { added: number; removed: number } {
+    const wanted = stored.filter((a) => a.provider === this.provider.id && credentials[a.credentialId]);
+    const byId = new Map(this.accounts.map((a) => [a.credentialId, a]));
+    const keep = new Set(wanted.map((a) => a.credentialId));
+    let added = 0;
+    const next: RuntimeAccount[] = [];
+    for (const account of wanted) {
+      const live = byId.get(account.credentialId);
+      if (live) {
+        // Config fields may have been edited (label, enabled, priority); runtime
+        // fields and the possibly-refreshed credential stay as they are.
+        next.push(Object.assign(live, { label: account.label, enabled: account.enabled, priority: account.priority }));
+      } else {
+        added++;
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0 });
+      }
+    }
+    const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
+    for (const account of dropped.filter((a) => a.inflight > 0)) next.push(account);
+    const removed = dropped.length - dropped.filter((a) => a.inflight > 0).length;
+    this.accounts.length = 0; this.accounts.push(...next);
+    for (const [session, id] of this.affinity) if (!this.accounts.some((a) => a.id === id)) this.affinity.delete(session);
+    return { added, removed };
+  }
+
   // Commit a known-accepted request shape, captured from a real 2xx response.
   // Only an upstream success proves the shape is servable, so quota probes can
   // replay it against other accounts instead of guessing a payload (a guessed
@@ -139,7 +170,15 @@ export class AccountPool {
     if (!this.provider.fetchProfile) return 0;
     let updated = 0;
     for (const account of this.accounts) {
-      try { await this.refresh(account); account.profile = await this.provider.fetchProfile(account.credential); updated++; } catch { /* retain last known profile */ }
+      try {
+        await this.refresh(account);
+        const fetched = await this.provider.fetchProfile(account.credential);
+        // Response headers carry fresher facts than a token decode (and some,
+        // like the active limit tier, are header-only), so a refresh must not
+        // blank what live traffic already taught us.
+        account.profile = { ...fetched, orgType: fetched.orgType ?? account.profile?.orgType ?? null, rateLimitTier: fetched.rateLimitTier ?? account.profile?.rateLimitTier ?? null };
+        updated++;
+      } catch { /* retain last known profile */ }
     }
     return updated;
   }

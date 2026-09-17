@@ -90,6 +90,12 @@ export const claudeProvider: Provider = {
     const data = await tokenRefresh('https://platform.claude.com/v1/oauth/token', 'application/json', JSON.stringify({ grant_type: 'refresh_token', refresh_token: credential.refreshToken, client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e' }));
     return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
   },
+  defaultProbe() {
+    // The shape Claude Code itself sends. Subscription (OAuth) credentials are
+    // rejected for anything that doesn't look like the official client, so this
+    // is the only payload worth replaying when no live template exists yet.
+    return { path: '/v1/messages', model: 'claude-sonnet-5', version: '2023-06-01', beta: 'oauth-2025-04-20', system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }], userAgent: 'claude-cli/2.1.260 (external, cli)', query: '?beta=true', elicitsModelWeekly: false };
+  },
   captureProbe(path, headers, body, sawModelWeekly) {
     if (!path.startsWith('/v1/messages')) return null;
     let parsed: { model?: unknown; system?: unknown };
