@@ -58,6 +58,14 @@ be running. The block is delimited by markers and rewritten in place, so
 re-running it upgrades rather than appends; every write leaves a timestamped
 backup, and install/uninstall cycles restore the file byte for byte.
 
+A supervisor is optional: `cl`, `co`, `tai` and `teamai run` all start the relay
+themselves when nothing is listening, so they keep working if the LaunchAgent is
+unloaded, fails, or was never installed. A stale `server.json` left by a killed
+process is ignored and replaced. When startup does fail, the reason from the
+server (a port already in use, an unreadable credential file) is reported
+instead of a bare "did not start", and the full output is kept at
+`~/.config/teamai/server-start.log`.
+
 To run the relay as a login item instead of starting it on demand, point a
 LaunchAgent at `dist/src/cli.js server` with `RunAtLoad` and `KeepAlive`.
 

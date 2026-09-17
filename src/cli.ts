@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { chmod, mkdir, readFile, writeFile, lstat, symlink } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, writeFile, lstat, symlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { runServer, runningPid } from './runtime.js';
-import { loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
+import { dataDir, loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
 import type { ProviderId } from './types.js';
 
@@ -63,11 +63,25 @@ async function priority(): Promise<void> { const id = provider(args[0]); const r
 async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); }
 async function stop(quiet = false): Promise<void> { const pid = await runningPid(); if (!pid) { if (!quiet) console.log('TeamAI server is not running'); return; } process.kill(pid, 'SIGTERM'); for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((r) => setTimeout(r, 100)); if (!quiet) console.log(`Stopped TeamAI server ${pid}`); }
 
+// Start the relay on demand. This is what makes the launchers work whether or
+// not a LaunchAgent (or any other supervisor) is managing the server: if
+// nothing is listening, the client starts one itself.
 async function ensureServer(): Promise<void> {
   if (await runningPid()) return;
-  const cli = fileURLToPath(import.meta.url); const child = spawn(process.execPath, [cli, 'server'], { detached: true, stdio: 'ignore', env: process.env }); child.unref();
+  // Capture the child's output instead of discarding it: when startup fails,
+  // its stderr is the only thing that says why (a port already taken, a bad
+  // credential file), and "did not start" on its own sends the user hunting.
+  const log = join(dataDir(), 'server-start.log');
+  await mkdir(dirname(log), { recursive: true, mode: 0o700 });
+  const handle = await open(log, 'w', 0o600);
+  const cli = fileURLToPath(import.meta.url);
+  const child = spawn(process.execPath, [cli, 'server'], { detached: true, stdio: ['ignore', handle.fd, handle.fd], env: process.env });
+  child.unref();
+  await handle.close();
   for (let i = 0; i < 50; i++) { if (await runningPid()) return; await new Promise((r) => setTimeout(r, 100)); }
-  throw new Error('TeamAI server did not start');
+  let detail = '';
+  try { detail = (await readFile(log, 'utf8')).trim(); } catch { /* nothing was written */ }
+  throw new Error(detail ? `TeamAI server did not start: ${detail}` : `TeamAI server did not start (see ${log})`);
 }
 
 async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
