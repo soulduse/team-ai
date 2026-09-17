@@ -194,6 +194,11 @@ export const codexProvider: Provider = {
     }
     return { status: 'active', createdAt: null, rateLimitTier: plan, orgType: null, hasClaudeMax: null, hasClaudePro: null, fetchedAt: Date.now() };
   },
+  defaultProbe() {
+    // The model the Codex CLI defaults to; the backend rejects the ChatGPT-
+    // unsupported ones outright, so this is the shape a real session sends.
+    return { path: '/codex/responses', model: 'gpt-6-astra', version: '', beta: 'responses=experimental', system: null, userAgent: 'codex_cli_rs/0.154.0', query: '', elicitsModelWeekly: false };
+  },
   captureProbe(path, headers, body) {
     if (path !== '/codex/responses') return null;
     let parsed: { model?: unknown; instructions?: unknown };

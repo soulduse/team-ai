@@ -101,6 +101,7 @@ export interface Provider {
   classifyFailure(status: number, headers: Headers, body: string): FailureDecision;
   refresh(credential: OAuthCredential): Promise<OAuthCredential>;
   fableModel?: string;
+  defaultProbe?(): ProbeTemplate | null;
   captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };
   fetchProfile?(credential: OAuthCredential): Promise<SubscriptionProfile>;

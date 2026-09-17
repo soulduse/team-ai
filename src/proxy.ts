@@ -56,6 +56,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         try { await pool.refresh(account, true); } catch (error) { pool.fail(account, (error as Error).message); excluded.add(account.id); }
         onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} auth refresh`); continue;
       }
+      if (decision.kind === 'quota') pool.commitProbeFromQuotaRejection(path, incomingHeaders(req), body, response.headers);
       if (decision.kind === 'quota' || decision.kind === 'forbidden' || decision.kind === 'transient') {
         pool.cooldown(account, decision.retryAfterMs); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}; failover`);
         if (excluded.size < pool.accounts.length) continue;

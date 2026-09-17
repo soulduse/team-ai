@@ -68,6 +68,18 @@ export class AccountPool {
     if (candidate) this.probeTemplate = candidate;
   }
 
+  // A quota-bearing rejection is proof of shape too: upstream parsed the request
+  // and answered with this account's authoritative numbers. Without this, a
+  // fleet whose accounts are ALL exhausted can never commit a template from a
+  // 2xx, so `R` would report nothing to measure for exactly the fleet whose
+  // numbers the user most wants to see.
+  commitProbeFromQuotaRejection(path: string, headers: Headers, body: Buffer, responseHeaders: Headers): void {
+    if (!this.provider.captureProbe || this.probeTemplate) return;
+    if (!this.provider.readQuota(responseHeaders)) return;
+    const candidate = this.provider.captureProbe(path, headers, body, false);
+    if (candidate) this.probeTemplate = candidate;
+  }
+
   hasProbe(): boolean { return this.probeTemplate !== null && Boolean(this.provider.probeRequest); }
 
   // Force a fleet-wide quota re-measure (TUI 'R'). Replays the committed
@@ -77,6 +89,11 @@ export class AccountPool {
   // lifetime is the main reason a refresh would otherwise measure nothing.
   // Returns { targets, measured } so the TUI can report honest M/N.
   async probeAll(): Promise<{ targets: number; measured: number }> {
+    // Fall back to the shape this provider knows its client sends. A pool whose
+    // accounts are ALL exhausted never serves a request, so it can never capture
+    // a template from live traffic — and would stay permanently unmeasurable,
+    // which is exactly when the numbers matter most.
+    if (!this.probeTemplate && this.provider.defaultProbe) this.probeTemplate = this.provider.defaultProbe();
     if (!this.hasProbe() || this.probing) return { targets: 0, measured: 0 };
     this.probing = true;
     try {
