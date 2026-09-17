@@ -10,7 +10,7 @@ export function dataDir(): string {
 export const paths = () => ({ config: join(dataDir(), 'config.json'), credentials: join(dataDir(), 'credentials.json'), state: join(dataDir(), 'state.json'), server: join(dataDir(), 'server.json') });
 
 export function defaultConfig(): TeamAIConfig {
-  return { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: `tai-${randomBytes(24).toString('base64url')}` }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [] };
+  return { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, controlPort: 3556, clientToken: `tai-${randomBytes(24).toString('base64url')}` }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [] };
 }
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {

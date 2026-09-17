@@ -76,6 +76,24 @@ export async function runTui(): Promise<void> {
 
   const move = async (delta: number): Promise<void> => { const accounts = await rows(); const index = Math.max(0, accounts.findIndex((a) => a.credentialId === selectedId)); selectedId = accounts[Math.min(accounts.length - 1, Math.max(0, index + delta))]?.credentialId || null; };
   const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const config = await loadConfig(); const account = selected(config.accounts); if (!account) return; fn(account, config.accounts); await saveConfig(config); await restartDaemon(); };
+  // Fleet-wide quota re-measure. The server owns the pools (and the committed
+  // probe template), so this asks it over the local control channel rather than
+  // restarting it — a restart only re-read profiles and left every bar blank.
+  const remeasure = async (): Promise<void> => {
+    busy = true; message = 'Re-measuring quota...'; await render();
+    try {
+      const config = await loadConfig();
+      const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
+      const response = await fetch(`http://${config.proxy.host}:${port}/probe`, { headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(90_000) });
+      if (!response.ok) throw new Error(`control ${response.status}`);
+      const result = await response.json() as { targets: number; measured: number; ready: boolean };
+      message = !result.ready
+        ? 'No probe template yet — run one request through the proxy first'
+        : `Re-measured ${result.measured}/${result.targets} account(s)`;
+    } catch (error) { message = `Re-measure failed: ${(error as Error).message}`; }
+    finally { busy = false; }
+  };
+
   const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
   const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
     busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
@@ -100,7 +118,7 @@ export async function runTui(): Promise<void> {
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
       else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
-      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await restartDaemon(); message = 'Server reloaded; profile refresh scheduled'; }
+      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); }
     }
     await render();
   }));

@@ -2,7 +2,8 @@ import { writeFile, readFile, rm, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Server } from 'node:http';
 import { AccountPool } from './account-pool.js';
-import { createProxy } from './proxy.js';
+import { createProxy, secureEqual } from './proxy.js';
+import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
 import type { PersistedState } from './types.js';
@@ -24,6 +25,23 @@ export async function runServer(): Promise<void> {
   }
   const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`); };
   void refreshProfiles(); const profileTimer = setInterval(() => void refreshProfiles(), 6 * 60 * 60_000); profileTimer.unref();
+  // Local control channel: the TUI runs in a separate process, so a fleet-wide
+  // quota re-measure (R) has to reach the pools living here. Bound to the proxy
+  // host and gated by the same client token as the proxies.
+  const control = createServer(async (req, res) => {
+    const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
+    if (!secureEqual(token, config.proxy.clientToken)) { res.writeHead(401).end('{}'); return; }
+    if (!req.url?.startsWith('/probe')) { res.writeHead(404).end('{}'); return; }
+    const results = await Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll()));
+    const total = results.reduce((acc, r) => ({ targets: acc.targets + r.targets, measured: acc.measured + r.measured }), { targets: 0, measured: 0 });
+    const ready = pools.some((p) => p.hasProbe());
+    if (total.targets) persist(`Quota re-measure: ${total.measured}/${total.targets} account(s)`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ...total, ready }));
+  });
+  await new Promise<void>((resolve, reject) => { control.once('error', reject); control.listen(config.proxy.controlPort ?? config.proxy.claudePort + 100, config.proxy.host, () => { control.removeListener('error', reject); resolve(); }); });
+  servers.push(control);
+
   const serverPath = paths().server; await mkdir(dirname(serverPath), { recursive: true }); await writeFile(serverPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
   const shutdown = async (): Promise<void> => { clearInterval(profileTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); await saving; await persistNow(); await rm(serverPath, { force: true }); process.exit(0); };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);

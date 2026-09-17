@@ -1,4 +1,4 @@
-import type { OAuthCredential, Provider } from './types.js';
+import type { OAuthCredential, ProbeTemplate, Provider } from './types.js';
 
 const HOP_HEADERS = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'cookie', 'x-api-key']);
 
@@ -38,7 +38,7 @@ function timestamp(raw: string | null): number | null {
 }
 
 export const claudeProvider: Provider = {
-  id: 'claude', label: 'Claude', upstreamBase: 'https://api.anthropic.com',
+  id: 'claude', label: 'Claude', upstreamBase: 'https://api.anthropic.com', fableModel: 'claude-fable-5-1',
   normalizePath(path) { return path.startsWith('/v1/') || path.startsWith('/api/') ? path : null; },
   buildHeaders(incoming, account) {
     const headers = outboundHeaders(incoming);
@@ -89,6 +89,36 @@ export const claudeProvider: Provider = {
     if (!credential.refreshToken) throw new Error('No Claude refresh token');
     const data = await tokenRefresh('https://platform.claude.com/v1/oauth/token', 'application/json', JSON.stringify({ grant_type: 'refresh_token', refresh_token: credential.refreshToken, client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e' }));
     return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
+  },
+  captureProbe(path, headers, body, sawModelWeekly) {
+    if (!path.startsWith('/v1/messages')) return null;
+    let parsed: { model?: unknown; system?: unknown };
+    try { parsed = JSON.parse(body.toString('utf8')) as { model?: unknown; system?: unknown }; } catch { return null; }
+    if (typeof parsed.model !== 'string') return null;
+    const query = path.includes('?') ? path.slice(path.indexOf('?')) : '';
+    return {
+      path: '/v1/messages', model: parsed.model, version: headers.get('anthropic-version') || '2023-06-01',
+      beta: headers.get('anthropic-beta'), system: parsed.system ?? null,
+      userAgent: headers.get('user-agent'), query, elicitsModelWeekly: sawModelWeekly,
+    };
+  },
+  probeRequest(template, credential) {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json', 'anthropic-version': template.version,
+      authorization: `Bearer ${credential.accessToken}`,
+    };
+    if (template.beta) headers['anthropic-beta'] = template.beta;
+    // Upstream gates newer models on the client version in the user-agent, so a
+    // template captured from an older client cannot probe the Fable window it is
+    // meant to measure (400 "version X or newer is required"). Float the version
+    // to the floor the model needs while preserving the captured client shape.
+    const agent = template.userAgent || 'claude-cli/2.1.260 (external, cli)';
+    const version = /claude-cli\/(\d+)\.(\d+)\.(\d+)/.exec(agent);
+    const tooOld = !version || Number(version[1]) < 2 || (Number(version[1]) === 2 && (Number(version[2]) < 1 || (Number(version[2]) === 1 && Number(version[3]) < 251)));
+    headers['user-agent'] = tooOld ? agent.replace(/claude-cli\/[\d.]+/, 'claude-cli/2.1.260') : agent;
+    const payload: Record<string, unknown> = { model: template.model, max_tokens: 1, messages: [{ role: 'user', content: 'x' }] };
+    if (template.system) payload.system = template.system;
+    return { url: `https://api.anthropic.com${template.path}${template.query}`, headers, body: JSON.stringify(payload) };
   },
   async fetchProfile(credential) {
     const response = await fetch('https://api.anthropic.com/api/oauth/profile', { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(15_000) });
@@ -147,6 +177,29 @@ export const codexProvider: Provider = {
     if (!credential.refreshToken) throw new Error('No Codex refresh token');
     const data = await tokenRefresh('https://auth.openai.com/oauth/token', 'application/x-www-form-urlencoded', new URLSearchParams({ grant_type: 'refresh_token', refresh_token: credential.refreshToken, client_id: 'app_EMoamEEZ73f0CkXaXp7hrann' }).toString());
     return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
+  },
+  captureProbe(path, headers, body) {
+    if (path !== '/codex/responses') return null;
+    let parsed: { model?: unknown; instructions?: unknown };
+    try { parsed = JSON.parse(body.toString('utf8')) as { model?: unknown; instructions?: unknown }; } catch { return null; }
+    if (typeof parsed.model !== 'string') return null;
+    return {
+      path: '/codex/responses', model: parsed.model, version: '', beta: headers.get('openai-beta'),
+      system: parsed.instructions ?? null, userAgent: headers.get('user-agent'), query: '', elicitsModelWeekly: false,
+    };
+  },
+  probeRequest(template, credential) {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json', authorization: `Bearer ${credential.accessToken}`,
+      'chatgpt-account-id': credential.accountId, 'openai-beta': template.beta || 'responses=experimental',
+      originator: 'codex_cli_rs',
+    };
+    if (template.userAgent) headers['user-agent'] = template.userAgent;
+    // The Responses API rejects a max_output_tokens below 16, so this is the
+    // floor here rather than the 1 used for Claude.
+    const payload: Record<string, unknown> = { model: template.model, input: [{ role: 'user', content: 'x' }], max_output_tokens: 16, stream: false };
+    if (template.system) payload.instructions = template.system;
+    return { url: `https://chatgpt.com/backend-api${template.path}`, headers, body: JSON.stringify(payload) };
   },
 };
 

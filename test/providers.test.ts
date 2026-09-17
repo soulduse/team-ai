@@ -47,3 +47,39 @@ test('parses Claude session, weekly, and Fable windows with Unix reset seconds',
   assert.equal(quota?.windows['7d_oi']?.resetsAt, reset * 1000);
   assert.equal(quota?.routingUsage, 0.86, 'model-only Fable quota must not disable the whole account');
 });
+
+test('Claude probe template is captured from an accepted request and floats an old client version', () => {
+  const headers = new Headers({
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'oauth-2025-04-20',
+    'user-agent': 'claude-cli/2.1.0 (external, cli)',
+  });
+  const body = Buffer.from(JSON.stringify({ model: 'claude-sonnet-5', system: [{ type: 'text', text: 'You are Claude Code' }] }));
+  const template = claudeProvider.captureProbe!('/v1/messages?beta=true', headers, body, false);
+  assert.ok(template);
+  assert.equal(template.model, 'claude-sonnet-5');
+  assert.equal(template.query, '?beta=true');
+  assert.equal(template.beta, 'oauth-2025-04-20');
+
+  const shape = claudeProvider.probeRequest!(template, { accessToken: 'tok', refreshToken: null, expiresAt: null, accountId: 'acc' });
+  assert.match(shape.url, /\/v1\/messages\?beta=true$/);
+  assert.equal(shape.headers.authorization, 'Bearer tok');
+  // The captured 2.1.0 is below the floor newer models require, so it floats up.
+  assert.match(shape.headers['user-agent']!, /claude-cli\/2\.1\.260/);
+  assert.equal(JSON.parse(shape.body).max_tokens, 1);
+});
+
+test('Claude probe keeps a client version that already meets the floor', () => {
+  const headers = new Headers({ 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/2.9.9 (external, cli)' });
+  const template = claudeProvider.captureProbe!('/v1/messages', headers, Buffer.from(JSON.stringify({ model: 'claude-sonnet-5' })), true);
+  assert.ok(template);
+  assert.equal(template.elicitsModelWeekly, true);
+  const shape = claudeProvider.probeRequest!(template, { accessToken: 't', refreshToken: null, expiresAt: null, accountId: 'a' });
+  assert.match(shape.headers['user-agent']!, /claude-cli\/2\.9\.9/);
+});
+
+test('probe capture ignores unrelated paths and unparsable bodies', () => {
+  assert.equal(claudeProvider.captureProbe!('/v1/models', new Headers(), Buffer.from('{}'), false), null);
+  assert.equal(claudeProvider.captureProbe!('/v1/messages', new Headers(), Buffer.from('not json'), false), null);
+  assert.equal(codexProvider.captureProbe!('/models', new Headers(), Buffer.from('{}'), false), null);
+});

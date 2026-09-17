@@ -4,7 +4,7 @@ import { AccountPool } from './account-pool.js';
 
 const MAX_BODY = 32 * 1024 * 1024;
 
-function secureEqual(a: string, b: string): boolean {
+export function secureEqual(a: string, b: string): boolean {
   const aa = Buffer.from(a); const bb = Buffer.from(b); const size = Math.max(aa.length, bb.length, 1); const pa = Buffer.alloc(size); const pb = Buffer.alloc(size); aa.copy(pa); bb.copy(pb);
   return timingSafeEqual(pa, pb) && aa.length === bb.length;
 }
@@ -62,6 +62,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       }
       copyHeaders(response, res); res.writeHead(response.status); res.end(errorBody); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}`); return;
     }
+    pool.commitProbe(path, incomingHeaders(req), body, response.headers);
     copyHeaders(response, res); res.writeHead(response.status);
     try {
       if (!response.body) res.end();

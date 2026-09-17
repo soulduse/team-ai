@@ -19,10 +19,21 @@ export interface OAuthCredential {
 
 export interface TeamAIConfig {
   version: 1;
-  proxy: { host: string; claudePort: number; codexPort: number; clientToken: string };
+  proxy: { host: string; claudePort: number; codexPort: number; controlPort?: number; clientToken: string };
   switchThreshold: number;
   maxConcurrentPerAccount: number;
   accounts: StoredAccount[];
+}
+
+export interface ProbeTemplate {
+  path: string;
+  model: string;
+  version: string;
+  beta: string | null;
+  system: unknown;
+  userAgent: string | null;
+  query: string;
+  elicitsModelWeekly: boolean;
 }
 
 export interface QuotaWindow {
@@ -89,5 +100,8 @@ export interface Provider {
   readQuota(headers: Headers, body?: string): QuotaSnapshot | null;
   classifyFailure(status: number, headers: Headers, body: string): FailureDecision;
   refresh(credential: OAuthCredential): Promise<OAuthCredential>;
+  fableModel?: string;
+  captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
+  probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };
   fetchProfile?(credential: OAuthCredential): Promise<SubscriptionProfile>;
 }
