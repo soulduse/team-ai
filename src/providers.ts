@@ -159,11 +159,14 @@ export const codexProvider: Provider = {
       const at = headers.get(`x-codex-${window}-reset-at`);
       let reset: number | null = Number.isFinite(after) && after > 0 ? Date.now() + after * 1000 : null;
       if (reset === null && at) { const numeric = Number(at); const parsed = /^\d+$/.test(at) ? (numeric < 10_000_000_000 ? numeric * 1000 : numeric) : Date.parse(at); reset = Number.isFinite(parsed) ? parsed : null; }
-      return [{ name: window, usage: Math.max(0, Math.min(1, used / 100)), reset }];
+      // The window's own length, so the dashboard can name it by what it is (a
+      // 5-hour or weekly bucket) instead of "primary"/"secondary".
+      const span = Number(headers.get(`x-codex-${window}-window-minutes`));
+      return [{ name: window, usage: Math.max(0, Math.min(1, used / 100)), reset, minutes: Number.isFinite(span) && span > 0 ? span : null }];
     });
     if (codexWindows.length) {
       const binding = codexWindows.sort((a, b) => b.usage - a.usage)[0]!;
-      return { routingUsage: binding.usage, routingResetsAt: binding.reset, windows: Object.fromEntries(codexWindows.map((window) => [window.name, { usage: window.usage, resetsAt: window.reset }])) };
+      return { routingUsage: binding.usage, routingResetsAt: binding.reset, windows: Object.fromEntries(codexWindows.map((window) => [window.name, { usage: window.usage, resetsAt: window.reset, minutes: window.minutes }])) };
     }
     const remaining = Number(headers.get('x-ratelimit-remaining-requests'));
     const limit = Number(headers.get('x-ratelimit-limit-requests'));

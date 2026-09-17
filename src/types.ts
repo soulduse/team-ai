@@ -39,6 +39,7 @@ export interface ProbeTemplate {
 export interface QuotaWindow {
   usage: number | null;
   resetsAt: number | null;
+  minutes?: number | null;
 }
 
 export interface QuotaSnapshot {

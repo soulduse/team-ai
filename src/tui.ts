@@ -48,6 +48,16 @@ function renewal(profile: SubscriptionProfile | null | undefined): string {
   const left = Math.round((target.getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000); return left <= 0 ? 'D-DAY' : `D-${left}`;
 }
 
+// A quota window's own length, named the way a person would say it ("5h", "7d").
+// Codex reports the span in its headers; Claude's window names already carry it.
+function windowLabel(minutes: number | null | undefined, fallback: string): string {
+  if (!minutes) return fallback;
+  if (minutes % 10080 === 0) return `${minutes / 10080}w`;
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
 export async function runTui(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
   let selectedId: string | null = null; let mode: 'normal' | 'order' | 'delete' | 'add' = 'normal'; let message = ''; let busy = false; let closed = false;
@@ -64,16 +74,24 @@ export async function runTui(): Promise<void> {
       const group = accounts.filter((account) => account.provider === provider); if (!group.length) continue;
       const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;
       lines.push(color(36, `┌─${sectionTitle}${'─'.repeat(Math.max(0, width - sectionTitle.length - 3))}┐`));
+      // Column titles: the rows are dense and every field below is an
+      // abbreviation, so name them once per section rather than expecting the
+      // reader to infer what "auto" or a bare percentage refers to.
+      const slot = (title: string): string => fit(title, barWidth + 7);
+      const usageTitles = provider === 'claude'
+        ? `${slot('5h session')}${slot('7d overall')}${slot('7d Fable')}`
+        : `${slot('main limit')}${slot('burst limit')}`;
+      lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)} ${usageTitles}`, width)));
       for (const account of group) {
         const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
         const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
         const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
         if (provider === 'claude') {
           const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-          lines.push(`${head} Ses ${bar(session?.usage, session?.resetsAt, barWidth)} Wk ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} Fbl ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored}`);
+          lines.push(`${head} ${color(90, fit('5h', 5))} ${bar(session?.usage, session?.resetsAt, barWidth)} ${color(90, fit('7d', 5))} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${color(90, fit('Fable', 5))} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ${color(90, 'renews')} ~${renewColored}`);
         } else {
           const primary = saved?.windows?.primary || saved?.windows?.requests; const secondary = saved?.windows?.secondary;
-          lines.push(`${head} Pri ${bar(primary?.usage, primary?.resetsAt, barWidth)} Sec ${bar(secondary?.usage, secondary?.resetsAt, barWidth)} ${profile?.status || ''}`);
+          lines.push(`${head} ${color(90, fit(windowLabel(primary?.minutes, 'limit'), 5))} ${bar(primary?.usage, primary?.resetsAt, barWidth)} ${color(90, fit(windowLabel(secondary?.minutes, 'burst'), 5))} ${bar(secondary?.usage, secondary?.resetsAt, barWidth)}`);
         }
       }
       lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
