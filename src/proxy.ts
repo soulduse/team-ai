@@ -73,5 +73,10 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   }
 }
 
-function copyHeaders(response: Response, res: ServerResponse): void { for (const [key, value] of response.headers) if (!['connection', 'transfer-encoding', 'content-length'].includes(key)) res.setHeader(key, value); }
+// fetch decompresses the upstream body transparently, so what we forward is
+// already plain text. Passing its content-encoding through would tell the
+// client to decompress it a second time — the client then fails on a body that
+// was never compressed (BrotliDecompressionError). content-length is dropped
+// for the same reason: it describes the compressed length.
+function copyHeaders(response: Response, res: ServerResponse): void { for (const [key, value] of response.headers) if (!['connection', 'transfer-encoding', 'content-length', 'content-encoding'].includes(key)) res.setHeader(key, value); }
 function json(res: ServerResponse, status: number, value: unknown): void { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); }

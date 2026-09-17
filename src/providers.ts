@@ -1,6 +1,9 @@
 import type { OAuthCredential, ProbeTemplate, Provider } from './types.js';
 
-const HOP_HEADERS = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'cookie', 'x-api-key']);
+// accept-encoding is dropped too: fetch negotiates and decompresses on its own,
+// and echoing the client's preference upstream only invites a compressed body we
+// would then forward with a mismatched encoding header.
+const HOP_HEADERS = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'cookie', 'x-api-key', 'accept-encoding']);
 
 function outboundHeaders(incoming: Headers): Headers {
   const headers = new Headers(incoming);
