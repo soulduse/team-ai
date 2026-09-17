@@ -34,7 +34,14 @@ export class AccountPool {
   }
 
   release(account: RuntimeAccount): void { account.inflight = Math.max(0, account.inflight - 1); account.lastUsed = Date.now(); }
-  updateQuota(account: RuntimeAccount, headers: Headers, body?: string): void { const quota = this.provider.readQuota(headers, body); if (quota) { account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; } }
+  updateQuota(account: RuntimeAccount, headers: Headers, body?: string): void {
+    const quota = this.provider.readQuota(headers, body);
+    if (quota) { account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; }
+    // A live plan header is fresher than the one decoded from the token at
+    // login, so a plan change shows up without re-authenticating.
+    const plan = headers.get('x-codex-plan-type');
+    if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
+  }
   cooldown(account: RuntimeAccount, ms: number): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); }
   fail(account: RuntimeAccount, message: string): void { account.error = message; }
 

@@ -178,6 +178,22 @@ export const codexProvider: Provider = {
     const data = await tokenRefresh('https://auth.openai.com/oauth/token', 'application/x-www-form-urlencoded', new URLSearchParams({ grant_type: 'refresh_token', refresh_token: credential.refreshToken, client_id: 'app_EMoamEEZ73f0CkXaXp7hrann' }).toString());
     return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
   },
+  async fetchProfile(credential) {
+    // ChatGPT has no profile endpoint for Codex, but the plan is carried in the
+    // access token's auth claim, so decode it rather than leaving the row blank.
+    // A live response header (x-codex-plan-type) supersedes this when one
+    // arrives — see readQuota's planFromHeaders.
+    const part = credential.accessToken.split('.')[1];
+    let plan: string | null = null;
+    if (part) {
+      try {
+        const claims = JSON.parse(Buffer.from(part, 'base64url').toString()) as Record<string, unknown>;
+        const auth = claims['https://api.openai.com/auth'] as Record<string, unknown> | undefined;
+        if (auth && typeof auth.chatgpt_plan_type === 'string') plan = auth.chatgpt_plan_type;
+      } catch { /* opaque token */ }
+    }
+    return { status: 'active', createdAt: null, rateLimitTier: plan, orgType: null, hasClaudeMax: null, hasClaudePro: null, fetchedAt: Date.now() };
+  },
   captureProbe(path, headers, body) {
     if (path !== '/codex/responses') return null;
     let parsed: { model?: unknown; instructions?: unknown };
@@ -195,9 +211,12 @@ export const codexProvider: Provider = {
       originator: 'codex_cli_rs',
     };
     if (template.userAgent) headers['user-agent'] = template.userAgent;
-    // The Responses API rejects a max_output_tokens below 16, so this is the
-    // floor here rather than the 1 used for Claude.
-    const payload: Record<string, unknown> = { model: template.model, input: [{ role: 'user', content: 'x' }], max_output_tokens: 16, stream: false };
+    // The Codex backend rejects anything but a streaming, unstored request and
+    // does not accept max_output_tokens at all ("Unsupported parameter"), so the
+    // probe cannot be capped the way the Claude one is. Quota headers arrive on
+    // the response head, so the body is dropped without being read.
+    headers.accept = 'text/event-stream';
+    const payload: Record<string, unknown> = { model: template.model, input: [{ role: 'user', content: 'x' }], stream: true, store: false };
     if (template.system) payload.instructions = template.system;
     return { url: `https://chatgpt.com/backend-api${template.path}`, headers, body: JSON.stringify(payload) };
   },
