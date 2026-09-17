@@ -5,6 +5,8 @@ export class AccountPool {
   private affinity = new Map<string, string>();
   private probeTemplate: ProbeTemplate | null = null;
   private probing = false;
+  private warmupTries = new Map<string, number>();
+  readonly maxWarmupTries = 3;
   private refreshes = new Map<string, Promise<void>>();
 
   constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 3) {
@@ -52,6 +54,72 @@ export class AccountPool {
     const promise = this.provider.refresh(account.credential).then((next) => { account.credential = next; account.error = null; }).finally(() => this.refreshes.delete(account.id));
     this.refreshes.set(account.id, promise);
     return promise;
+  }
+
+  // A rolled-over window keeps its stale numbers until something looks, and
+  // warm-up only targets unmeasured accounts — so clear what upstream has
+  // already reset, which is what makes an idle proxy re-measure after a reset
+  // instead of showing last week's figures forever.
+  sweepExpired(): number {
+    const now = Date.now();
+    let swept = 0;
+    for (const account of this.accounts) {
+      let changed = false;
+      for (const [name, window] of Object.entries(account.windows)) {
+        if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; changed = true; }
+      }
+      if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; changed = true; }
+      if (changed) { this.warmupTries.delete(account.credentialId); swept++; }
+    }
+    return swept;
+  }
+
+  // Accounts worth a background probe: idle, not errored, and still without a
+  // reading. The attempt cap stops an account whose upstream never reports
+  // quota from being probed on every tick forever; it is cleared whenever a
+  // window is swept, since a fresh period is a fresh reason to look.
+  private warmupCandidates(): RuntimeAccount[] {
+    return this.accounts.filter((account) => account.inflight === 0 && !account.error && account.usage === null
+      && (this.warmupTries.get(account.credentialId) ?? 0) < this.maxWarmupTries);
+  }
+
+  // Background pass: measure only what is unmeasured, and top up a Fable window
+  // that ordinary traffic cannot fill. Unlike probeAll (the TUI's R) this never
+  // re-probes an account that already has numbers, so an idle proxy costs one
+  // request per account per reset period rather than one per tick.
+  async warmup(): Promise<number> {
+    if (!this.probeTemplate && this.provider.defaultProbe) this.probeTemplate = this.provider.defaultProbe();
+    if (!this.hasProbe() || this.probing) return 0;
+    this.probing = true;
+    try {
+      const candidates = this.warmupCandidates();
+      let measured = 0;
+      if (candidates.length) {
+        await Promise.all(candidates.map((a) => this.refresh(a).catch(() => { /* surfaced via error */ })));
+        const results = await Promise.all(candidates.filter((a) => !a.error && a.inflight === 0).map(async (account) => {
+          const ok = await this.probeOne(account);
+          if (ok) this.warmupTries.delete(account.credentialId);
+          else this.warmupTries.set(account.credentialId, (this.warmupTries.get(account.credentialId) ?? 0) + 1);
+          return ok;
+        }));
+        measured = results.filter(Boolean).length;
+      }
+      const fableModel = this.provider.fableModel;
+      if (fableModel) {
+        const missing = this.accounts.filter((a) => a.inflight === 0 && !a.error && a.usage !== null
+          && !Object.keys(a.windows).some((name) => /^7d_[a-z0-9]+$/i.test(name))
+          && (this.warmupTries.get(`fable:${a.credentialId}`) ?? 0) < this.maxWarmupTries);
+        if (missing.length) {
+          await Promise.all(missing.map(async (account) => {
+            const ok = await this.probeOne(account, fableModel);
+            const key = `fable:${account.credentialId}`;
+            if (ok && Object.keys(account.windows).some((name) => /^7d_[a-z0-9]+$/i.test(name))) this.warmupTries.delete(key);
+            else this.warmupTries.set(key, (this.warmupTries.get(key) ?? 0) + 1);
+          }));
+        }
+      }
+      return measured;
+    } finally { this.probing = false; }
   }
 
   // Absorb config/credential changes made by another process (the TUI writes
@@ -128,6 +196,7 @@ export class AccountPool {
     if (!this.hasProbe() || this.probing) return { targets: 0, measured: 0 };
     this.probing = true;
     try {
+      this.warmupTries.clear();
       const targets = this.accounts.filter((a) => a.inflight === 0);
       await Promise.all(targets.map((a) => this.refresh(a).catch(() => { /* surfaced below */ })));
       // Re-check inflight after the await: a live request may have been routed

@@ -21,6 +21,7 @@ export interface TeamAIConfig {
   version: 1;
   proxy: { host: string; claudePort: number; codexPort: number; controlPort?: number; clientToken: string };
   switchThreshold: number;
+  warmupIntervalMs?: number;
   maxConcurrentPerAccount: number;
   accounts: StoredAccount[];
 }

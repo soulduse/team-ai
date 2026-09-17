@@ -23,6 +23,23 @@ export async function runServer(): Promise<void> {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
     console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${port}`);
   }
+  // Periodic warm-up: fill in accounts the dashboard shows as unmeasured —
+  // including ones whose window just rolled over — without waiting for the user
+  // to press R or for client traffic to happen to reach them. Only unmeasured
+  // accounts are probed, so a settled fleet costs nothing per tick.
+  const warmupIntervalMs = config.warmupIntervalMs ?? 5 * 60_000;
+  if (warmupIntervalMs > 0) {
+    const runWarmup = async (): Promise<void> => {
+      const swept = pools.reduce((total, pool) => total + pool.sweepExpired(), 0);
+      const measured = (await Promise.all(pools.map((pool) => pool.warmup().catch(() => 0)))).reduce((a, b) => a + b, 0);
+      if (measured) persist(`Warm-up measured ${measured} account(s)${swept ? ` after ${swept} window reset(s)` : ''}`);
+      else if (swept) persist(`${swept} quota window(s) reset`);
+    };
+    const warmupTimer = setInterval(() => void runWarmup(), warmupIntervalMs);
+    warmupTimer.unref();
+    setTimeout(() => void runWarmup(), 5_000).unref();
+  }
+
   const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`); };
   void refreshProfiles(); const profileTimer = setInterval(() => void refreshProfiles(), 6 * 60 * 60_000); profileTimer.unref();
   // Local control channel: the TUI runs in a separate process, so a fleet-wide
