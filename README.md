@@ -42,6 +42,25 @@ teamai session        # choose [1] Claude or [2] Codex interactively
 
 The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.
 
+## Shell setup
+
+```bash
+./scripts/install-shell.sh            # adds a marked block to ~/.zshrc
+./scripts/install-shell.sh --dry-run  # show the diff, write nothing
+./scripts/install-shell.sh --uninstall
+```
+
+It defines `cl` (Claude Code) and `co` (Codex) through the pool, plus `tai`,
+`tais` and `taistart`/`tairestart`/`taistop` for the LaunchAgent, and unsets a
+globally pinned `ANTHROPIC_BASE_URL` — TeamAI points each session at its own
+port, so a stale global value only routes traffic to a proxy that may no longer
+be running. The block is delimited by markers and rewritten in place, so
+re-running it upgrades rather than appends; every write leaves a timestamped
+backup, and install/uninstall cycles restore the file byte for byte.
+
+To run the relay as a login item instead of starting it on demand, point a
+LaunchAgent at `dist/src/cli.js server` with `RunAtLoad` and `KeepAlive`.
+
 Codex uses its normal browser login flow. TeamAI does not require ChatGPT's optional device-code authentication setting to be enabled.
 
 Credential import is optional and only works when an exportable credential file exists:
