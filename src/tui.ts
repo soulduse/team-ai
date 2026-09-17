@@ -31,11 +31,15 @@ function healthy(profile: SubscriptionProfile | null | undefined): boolean { ret
 // them the way the product names them so a Codex row reads like a Claude one.
 function codexPlan(profile: SubscriptionProfile | null | undefined): string {
   const raw = profile?.rateLimitTier;
-  if (!raw) return 'ChatGPT';
+  // Before the first profile refresh there is nothing to show yet; say so
+  // rather than printing a brand name that looks like a plan.
+  if (!raw) return '—';
   const names: Record<string, string> = { pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', business: 'Business', enterprise: 'Enterprise', free: 'Free' };
-  // ChatGPT exposes no Max-style multiplier anywhere — not in the token claims
-  // and not in a response header that arrives reliably — so the plan name is
-  // the whole of what can be shown here.
+  // ChatGPT exposes no Max-style multiplier anywhere: not in the token claims,
+  // not in a header that arrives on every response, and not derivable from the
+  // quota windows either — Pro and Pro Lite both report a 10080-minute window
+  // and a percentage, never the absolute allowance the percentage is of. The
+  // plan name is the whole of what can be known.
   return names[raw.toLowerCase()] || raw;
 }
 function tier(profile: SubscriptionProfile | null | undefined): string {
