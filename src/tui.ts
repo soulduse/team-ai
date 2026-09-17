@@ -90,27 +90,37 @@ export async function runTui(): Promise<void> {
       // Column titles: the rows are dense and every field below is an
       // abbreviation, so name them once per section rather than expecting the
       // reader to infer what "auto" or a bare percentage refers to.
-      const slot = (title: string): string => fit(title, barWidth + 7);
+      const slot = (title: string): string => ` ${fit(title, barWidth)}`;
       // Codex titles follow whatever windows are actually in play for this
       // section, so the header never advertises a gauge that no row renders.
       const codexWindowCount = Math.max(...group.map((account) => {
         const saved = state.accounts[account.credentialId];
         return [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow).length;
       }), 0);
+      // Codex window lengths vary by account, so the title carries the span the
+      // rows no longer repeat; fall back to a neutral name when they disagree.
+      const codexSpans = group.map((account) => {
+        const saved = state.accounts[account.credentialId];
+        return [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow).map((window) => windowLabel(window!.minutes, ''));
+      });
+      const spanAt = (index: number): string => {
+        const seen = new Set(codexSpans.map((spans) => spans[index]).filter(Boolean));
+        return seen.size === 1 ? `${[...seen][0]} limit` : index === 0 ? 'usage limit' : 'second limit';
+      };
       const usageTitles = provider === 'claude'
         ? `${slot('5h session')}${slot('7d overall')}${slot('7d Fable')}`
-        : Array.from({ length: codexWindowCount }, (_, index) => slot(index === 0 ? 'usage limit' : 'second limit')).join('');
-      lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)} ${usageTitles}`, width)));
+        : Array.from({ length: codexWindowCount }, (_, index) => slot(spanAt(index))).join('');
+      lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
       for (const account of group) {
         const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
         const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
         const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
         if (provider === 'claude') {
           const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-          lines.push(`${head} ${color(90, fit('5h', 5))} ${bar(session?.usage, session?.resetsAt, barWidth)} ${color(90, fit('7d', 5))} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${color(90, fit('Fable', 5))} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ${color(90, 'renews')} ~${renewColored}`);
+          lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored}`);
         } else {
           const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
-          const gauges = shown.map((window) => `${color(90, fit(windowLabel(window!.minutes, 'limit'), 5))} ${bar(window!.usage, window!.resetsAt, barWidth)}`).join(' ');
+          const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');
           lines.push(`${head} ${gauges || color(90, 'no quota data yet')}`);
         }
       }
