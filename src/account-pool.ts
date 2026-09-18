@@ -20,7 +20,16 @@ export class AccountPool {
   constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 3, readonly fableReserve = 0.8) {
     this.accounts = stored.filter((a) => a.provider === provider.id && credentials[a.credentialId]).map((account) => {
       const saved = state.accounts[account.credentialId];
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: saved?.cooldownUntil ?? null, lastUsed: saved?.lastUsed ?? null, error: saved?.error ?? null, inflight: 0 };
+      // Restore the long-lived quota state (usage/windows/reset/profile) so the
+      // dashboard and ranking survive a restart without re-measuring — but NOT
+      // cooldownUntil or error. Both are per-response signals: a cooldown says
+      // "one 429 told us to rest this account for a while", an error says "the
+      // last attempt failed". Persisting them means a restart re-benches an
+      // account that may be fine now — exactly how a Fable-only 429's weekly
+      // retry-after came back to park seven accounts across restarts. If the
+      // account really is spent, the next request re-derives the right cooldown
+      // (model-quota → Fable only, real quota → whole account).
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.

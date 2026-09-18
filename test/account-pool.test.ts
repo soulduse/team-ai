@@ -244,3 +244,22 @@ test('exportState omits probes when none was learned', () => {
   pool.exportState(exported);
   assert.equal(exported.probes, undefined, 'nothing to persist means no probes key');
 });
+
+test('a restart does not restore cooldown or error, but keeps quota', () => {
+  // A saved snapshot where the account is cooled down and errored, yet its
+  // long-lived quota shows plenty of room.
+  const saved: PersistedState = { version: 1, accounts: { 'codex:a': {
+    usage: 0.3, resetsAt: null, windows: { '7d': { usage: 0.3, resetsAt: null } },
+    profile: null, cooldownUntil: Date.now() + 7 * 24 * 60 * 60_000, lastUsed: 123, error: 'old failure',
+  } } };
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, saved);
+  const acct = pool.accounts[0]!;
+  // Cooldown and error are per-response signals — a restart must not re-bench.
+  assert.equal(acct.cooldownUntil, null, 'a stale cooldown must not survive a restart');
+  assert.equal(acct.error, null, 'a stale error must not survive a restart');
+  // Quota is long-lived — it must survive so the dashboard/ranking need no re-measure.
+  assert.equal(acct.usage, 0.3);
+  assert.equal(acct.windows['7d']?.usage, 0.3);
+  // And the account is therefore immediately selectable, not parked.
+  assert.equal(pool.acquire('s')?.id, 'a');
+});
