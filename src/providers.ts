@@ -1,4 +1,4 @@
-import type { OAuthCredential, ProbeTemplate, Provider } from './types.js';
+import type { OAuthCredential, Provider } from './types.js';
 
 // accept-encoding is dropped too: fetch negotiates and decompresses on its own,
 // and echoing the client's preference upstream only invites a compressed body we
