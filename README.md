@@ -6,7 +6,7 @@ TeamAI is a local multi-account relay for **Claude Code** and the official **Cod
 
 ![TeamAI dashboard](docs/dashboard.png)
 
-<sub>The dashboard above is rendered by <a href="docs/render-dashboard.py">docs/render-dashboard.py</a> rather than captured, so no real account labels live in this repository.</sub>
+<sub>The dashboard above is a real capture, taken with <code>teamai capture --redact full</code>: real quota and activity, no account addresses.</sub>
 
 > TeamAI is an independent open-source project. It is not affiliated with Anthropic, OpenAI, or the unrelated service at teamai.com.
 
@@ -149,6 +149,7 @@ teamai tui                                     # dashboard only, no auto-start
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # or: auto
+teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png, no TTY needed
 ```
 
 Accounts are ordered by how much quota they have left, least-spent first, in
@@ -182,6 +183,8 @@ shared window benches the account as usual.
 The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the `5h session`, `7d overall`, and model-scoped `7d Fable` windows independently; Codex rows show its primary and secondary windows, each titled with the span that account actually reports (`1w limit`). Quotas are learned from official-client responses and retained across restarts.
 
 The footer exposes the same account workflow as TeamClaude: launch Claude/Codex, select, switch, enable/disable, order, delete, add/login, re-measure (`R`), and quit. `switch` pins the selected account to the front of its provider pool; order mode can assign a rank or return an account to automatic scheduling. Claude profile refreshes show the plan tier and unhealthy subscription states such as `past_due` in red.
+
+`p` saves a capture of the dashboard, and `teamai capture` does the same from a script or an agent, no terminal required. Each capture is a pair of files under `~/.config/teamai/captures/` (or `--out DIR`): the frame as text with its colors intact, and the same frame as a PNG drawn with a built-in bitmap font, so nothing beyond Node is needed. Account addresses are masked before the frame is drawn — in the account column, the footer and the activity log alike — as `de•••••••••w@gm•••.com` by default; `--redact full` replaces them with `account #N`, and `--redact none` keeps them for a capture that stays private. The image at the top of this README is one such capture.
 
 `R` re-measures quota across the whole fleet. Quota is never polled from a separate endpoint — it is learned from the rate-limit headers upstream returns, so an account that has served no traffic shows `-` until something measures it. `R` replays a known-accepted request shape against every idle account in parallel (including already-measured and throttled ones, whose 429s still carry authoritative headers) and reports an honest `measured/targets` count. That shape is committed only from a real 2xx that flowed through the proxy, so until one request has succeeded `R` reports that no probe template exists yet rather than guessing a payload. Accounts missing the model-scoped weekly (Fable) window get one extra top-up probe, because that window only appears on responses to Fable-tier requests.
 

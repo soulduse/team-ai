@@ -6,7 +6,7 @@ TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中�
 
 ![TeamAI 仪表盘](docs/dashboard.png)
 
-<sub>上方的仪表盘并非截图，而是由 <a href="docs/render-dashboard.py">docs/render-dashboard.py</a> 渲染生成的，这样仓库中就不会留下真实的账号名称。</sub>
+<sub>上方的仪表盘是用 <code>teamai capture --redact full</code> 得到的真实截取：真实的配额与活动日志，没有账号地址。</sub>
 
 > TeamAI 是一个独立的开源项目，与 Anthropic、OpenAI 以及与之无关的 teamai.com 服务均无任何关联。
 
@@ -131,6 +131,7 @@ teamai tui                                     # 仅仪表盘，不自动启动
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 或者：auto
+teamai capture [--redact partial|full|none] [--out DIR]   # 把仪表盘保存为 .txt 和 .png（无需 TTY）
 ```
 
 账号按剩余配额多少排序，消耗最少的排在最前，仪表盘和账号池自身的选取逻辑用的是同一套顺序——所以最上面那一行就是下一个请求将要使用的账号。Claude 的判定依据是按模型计的周窗口（Fable），而不是总的那个，因为实际上最先拒绝顶级模型的正是这个窗口。一旦所有账号都耗尽，它们就全部并列，排序便退化为谁先恢复谁在前——在今天没有任何账号能处理请求的情况下，距离重置的时间是区分它们的唯一依据（Claude 看 Fable 窗口，Codex 看它的周窗口）。未经测量的账号排在最后（未知不等同于用尽），手动固定的优先级依然优先生效，按 `c` 可切换回配置的顺序。
@@ -142,6 +143,8 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `5h`／`7d` 窗口仍为允许�
 全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `5h session`、`7d overall` 以及按模型划分的 `7d Fable` 三个窗口；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
 
 底栏提供与 TeamClaude 相同的账号操作流程：启动 Claude/Codex、选择、切换、启用／禁用、排序、删除、添加／登录、重新测量（`R`）以及退出。`switch` 会把选中的账号固定到其所属服务商账号池的最前面；排序模式下可以指定名次，也可以把某个账号交回自动调度。刷新 Claude 资料时会显示套餐等级，并以红色标出 `past_due` 这类异常的订阅状态。
+
+`p` 会把仪表盘截取并保存，`teamai capture` 则可以在没有终端的情况下从脚本或代理完成同样的事。每次截取会在 `~/.config/teamai/captures/`（或 `--out DIR`）下留下一对文件：保留原有颜色的文本帧，以及用内置位图字体绘制的同一帧 PNG，除 Node 之外不需要任何东西。账号地址在绘制帧之前就已被遮盖，因此账号列、页脚和活动日志中都不会残留。默认是 `de•••••••••w@gm•••.com` 这样的部分遮盖；`--redact full` 会替换为 `account #N`；`--redact none` 则保留地址，用于只给自己看的截取。本 README 顶部的图片就是这样得到的一次截取。
 
 `R` 会对整批账号重新测量配额。配额从来不是通过轮询某个单独的接口获取的——它是从上游返回的 rate-limit 响应头中学习来的，因此一个还没承载过任何流量的账号会一直显示 `-`，直到有什么东西去测量它。`R` 会把一个已知会被接受的请求形态并行重放到每个空闲账号上（包括已测量过的和已被限流的账号，后者的 429 响应同样带有权威的响应头），并如实报告 `measured/targets` 计数。这个请求形态只有在真正经代理成功返回 2xx 后才会被确定下来，所以在还没有一次成功请求之前，`R` 会告知尚不存在探测模板，而不是去猜测一个请求体。缺少按模型计的周窗口（Fable）的账号会额外收到一次补充探测，因为该窗口只会出现在 Fable 级别请求的响应里。
 

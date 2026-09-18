@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayOrder } from '../src/tui.js';
-import type { PersistedState, StoredAccount } from '../src/types.js';
+import { buildFrame, displayOrder } from '../src/frame.js';
+import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
 function account(provider: 'claude' | 'codex', label: string, priority: number | null = null): StoredAccount {
   return { id: label, provider, label, enabled: true, priority, credentialId: `cred-${label}`, createdAt: '2026-01-01T00:00:00Z' };
@@ -44,4 +44,28 @@ test('display order leaves the input array untouched', () => {
   const before = config.map((a) => a.label);
   displayOrder(config, usage({ 'b@example.com': 0.9, 'a@example.com': 0.1 }), true);
   assert.deepEqual(config.map((a) => a.label), before);
+});
+
+const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+const plain = (line: string): string => line.replace(ANSI, '');
+
+test('buildFrame draws both sections, the column titles and the footer within the width', () => {
+  const config: TeamAIConfig = { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: 'tai-secret' }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [account('claude', 'c@example.com'), account('codex', 'x@example.com')] };
+  const state = usage({ 'c@example.com': 0.3, 'x@example.com': 0.9 });
+  const lines = buildFrame(config, state, { width: 120, selectedId: 'cred-c@example.com', mode: 'normal', message: 'hello', sortByHeadroom: true }).map(plain);
+  assert.ok(lines.every((line) => [...line].length <= 120), 'no line wider than the frame');
+  assert.ok(lines.some((line) => line.includes('Claude accounts (1)')));
+  assert.ok(lines.some((line) => line.includes('Codex accounts (1)')));
+  assert.ok(lines.some((line) => line.includes('5h session') && line.includes('7d overall') && line.includes('7d Fable')));
+  assert.ok(lines.some((line) => line.startsWith('> c@example.com')), 'cursor on the selected row');
+  const footer = lines.at(-1)!;
+  assert.match(footer, /p capture/); assert.match(footer, /c quota-sort/); assert.match(footer, /hello$/);
+  assert.equal(lines.join('\n').includes('tai-secret'), false);
+});
+
+test('buildFrame pads to the terminal height when given one and not otherwise', () => {
+  const config: TeamAIConfig = { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: 't' }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [account('claude', 'c@example.com')] };
+  const view = { width: 100, selectedId: null, mode: 'normal' as const, message: '', sortByHeadroom: true };
+  assert.equal(buildFrame(config, usage({}), { ...view, height: 40 }).length, 40);
+  assert.ok(buildFrame(config, usage({}), view).length < 40);
 });

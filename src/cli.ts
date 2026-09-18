@@ -6,6 +6,8 @@ import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
+import { captureDashboard } from './capture.js';
+import { isRedactLevel } from './redact.js';
 import { runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
@@ -37,6 +39,11 @@ async function main(): Promise<void> {
     case 'codex': await runClient('codex', args.filter((x) => x !== '--')); break;
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
     case 'tui': await runTui(); break;
+    case 'capture': {
+      const level = flag('--redact') ?? 'partial'; if (!isRedactLevel(level)) throw new Error('--redact must be partial, full or none');
+      const result = await captureDashboard({ level, outDir: flag('--out'), width: process.stdout.columns });
+      console.log(result.text); console.log(result.png); break;
+    }
     case 'help': case '--help': case '-h': help(); break;
     default: throw new Error(`Unknown command: ${command}`);
   }
@@ -122,6 +129,9 @@ Usage:
   teamai start|restart|status|stop
   teamai enable|disable <provider> <account>
   teamai priority <provider> <account> <rank|auto>
+  teamai capture [--redact partial|full|none] [--out DIR]
+                                       Save the dashboard as .txt and .png,
+                                       account addresses masked (no TTY needed)
 
 Run "teamai start", then press 1 for Claude Code or 2 for Codex.`); }
 

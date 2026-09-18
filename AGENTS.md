@@ -81,6 +81,7 @@ teamai tui                                # dashboard only (needs a TTY)
 teamai enable  <claude|codex> <account>
 teamai disable <claude|codex> <account>
 teamai priority <claude|codex> <account> <rank|auto>
+teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png; no TTY needed
 ```
 
 `<account>` is the account's label (usually the email) or its id, exactly as
@@ -92,6 +93,12 @@ teamai priority <claude|codex> <account> <rank|auto>
 dashboard and **throw `TUI requires a terminal` without a TTY**. In a
 non-interactive context use `teamai status` to read state and `teamai server` to
 run the relay. Never wrap the TUI in a pty to scrape it.
+
+To see what the dashboard shows, run `teamai capture`: it draws the same frame
+headlessly and writes it to `$TEAMAI_HOME/captures/` as `.txt` (colors kept)
+and `.png`, printing both paths. Account addresses are masked by default
+(`--redact partial`); `--redact full` numbers them, `--redact none` keeps them.
+Read the `.txt` for the data; never try to read the live TUI instead.
 
 ### Launching sessions
 
@@ -126,14 +133,20 @@ before speculating; a port conflict is the common cause.
 | `src/account-pool.ts` | Selection order, quota windows, warmup probes |
 | `src/proxy.ts` | Request relaying and retry-on-another-account |
 | `src/providers.ts` | Claude/Codex specifics: headers, quota parsing, refresh |
-| `src/tui.ts` | Dashboard rendering and key handling |
+| `src/frame.ts` | The dashboard as text: display order, gauges, the frame builder both the TUI and capture draw through |
+| `src/tui.ts` | Interactive loop and key handling |
+| `src/capture.ts` | `teamai capture` / the `p` key: redact, build the frame, write `.txt` + `.png` |
+| `src/redact.ts` | Account-address masking (partial / full / none), applied to data before drawing |
+| `src/png.ts` | Dependency-free PNG encoder (own CRC-32: `zlib.crc32` is Node 22.2+) and SGR-to-pixel renderer |
+| `src/font.ts` | Generated 9×18 bitmap glyphs; regenerate with `scripts/gen-font.py` (needs Pillow, build-time only) |
 | `src/storage.ts` | Config/state persistence, paths |
 | `src/auth.ts` | Login and credential import |
 | `test/` | `node --test` suites |
 
 ## Before you commit
 
-All four must pass; CI runs the same set on Node 20 and 22, Linux and macOS.
+All four must pass. There is no CI; this local gate is the whole gate, and the
+code must keep working on Node 20 (`engines`), not just on whatever is installed.
 
 ```bash
 npm run typecheck && npm test && npm run lint && npm run build
