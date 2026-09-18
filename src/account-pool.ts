@@ -103,10 +103,35 @@ export class AccountPool {
     return AccountPool.generalWindow(account)?.usage ?? account.usage;
   }
 
+  // Requests being proxied right now, across every proxy that shares this pool
+  // (the main port and its legacy aliases). Admission control reads it before
+  // buffering a body, so a flood of local clients cannot pin unbounded memory.
+  inFlightProxied = 0;
+
   private available(account: RuntimeAccount, excluded: Set<string>): boolean {
+    return this.availableIgnoringConcurrency(account, excluded) && account.inflight < this.maxConcurrent;
+  }
+
+  // Everything available() checks except the concurrency slot. Splitting it out
+  // lets the pool tell "no slot free right now" (retry) apart from "no account
+  // has budget left" (quota) without duplicating the eligibility rules.
+  private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>): boolean {
     const now = Date.now();
     if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; }
-    return account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < this.threshold) && account.inflight < this.maxConcurrent;
+    return account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < this.threshold);
+  }
+
+  // acquire returned nothing but at least one account is otherwise healthy and
+  // merely at its concurrency cap: the request should be told to retry, not that
+  // the fleet is out of quota.
+  saturatedButHealthy(excluded: Set<string> = new Set()): boolean {
+    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded) && a.inflight >= this.maxConcurrent);
+  }
+
+  // The useful concurrent load this pool can carry: a live account contributes
+  // its cap, a disabled one only the requests still draining through it.
+  totalCapacity(): number {
+    return this.accounts.reduce((sum, a) => sum + (a.enabled ? this.maxConcurrent : a.inflight), 0);
   }
 
   // `wantsFable` says whether this request needs the model-weekly budget. It is

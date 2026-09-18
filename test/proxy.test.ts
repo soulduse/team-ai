@@ -32,3 +32,76 @@ test('proxy strips client secrets and fails quota account over to the next accou
     assert.deepEqual(seen.map((x) => x.account), ['a', 'b']); assert.deepEqual(seen.map((x) => x.cookie), [null, null]);
   } finally { proxy.close(); upstream.close(); }
 });
+
+test('admission control rejects before buffering once the pool is at capacity', async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const upstream = createServer(async (req, res) => {
+    req.resume(); await new Promise<void>((r) => req.once('end', r));
+    await gate; // hold the first request open so the second finds the pool full
+    res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n');
+  });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: `http://127.0.0.1:${up.port}`,
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (incoming, account) => { const h = new Headers(incoming); h.set('authorization', `Bearer ${account.credential.accessToken}`); return h; },
+    classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }),
+  };
+  const stored: StoredAccount = { id: 'a', provider: 'codex', label: 'a', enabled: true, priority: 1, credentialId: 'a', createdAt: '' };
+  const state: PersistedState = { version: 1, accounts: {} };
+  // maxConcurrent 1, single account → totalCapacity 1.
+  const pool = new AccountPool(provider, [stored], { a: { accessToken: 's', refreshToken: null, expiresAt: null, accountId: 'a' } }, state, 0.98, 1);
+  const proxy = createProxy(pool, 'local-secret', () => {}, () => pool.totalCapacity());
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  const call = () => fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+  try {
+    const first = call();
+    // Wait until the first request is actually in flight (counted) before firing the second.
+    for (let i = 0; i < 50 && pool.inFlightProxied === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    const second = await call();
+    assert.equal(second.status, 429);
+    assert.equal(second.headers.get('retry-after'), '5');
+    assert.equal(second.headers.get('x-teamai-429-reason'), 'concurrency_saturated');
+    release();
+    assert.equal((await first).status, 200);
+  } finally { release(); proxy.close(); upstream.close(); }
+});
+
+test('admission control is off when no capacity function is given', async () => {
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: 'http://127.0.0.1:1',
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }),
+  };
+  const stored: StoredAccount = { id: 'a', provider: 'codex', label: 'a', enabled: true, priority: 1, credentialId: 'a', createdAt: '' };
+  const pool = new AccountPool(provider, [stored], { a: { accessToken: 's', refreshToken: null, expiresAt: null, accountId: 'a' } }, { version: 1, accounts: {} }, 0.98, 1);
+  pool.inFlightProxied = 999; // would be rejected IF admission were active
+  const proxy = createProxy(pool, 'local-secret', () => {}); // no capacity arg
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    // Reaches dispatch (not a 429-capacity short-circuit); upstream is unreachable → 502, not 429.
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    assert.notEqual(res.headers.get('x-teamai-429-reason'), 'concurrency_saturated');
+    await res.text();
+  } finally { proxy.close(); }
+});
+
+test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy', async () => {
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: 'http://127.0.0.1:1',
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }),
+  };
+  const stored: StoredAccount = { id: 'a', provider: 'codex', label: 'a', enabled: true, priority: 1, credentialId: 'a', createdAt: '' };
+  const pool = new AccountPool(provider, [stored], { a: { accessToken: 's', refreshToken: null, expiresAt: null, accountId: 'a' } }, { version: 1, accounts: {} }, 0.98, 1);
+  pool.accounts[0]!.usage = 1; // spent, not busy
+  const proxy = createProxy(pool, 'local-secret', () => {}, () => pool.totalCapacity());
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(res.status, 429);
+    assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
+    await res.text();
+  } finally { proxy.close(); }
+});

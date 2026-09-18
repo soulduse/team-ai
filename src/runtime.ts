@@ -31,7 +31,7 @@ export async function runServer(): Promise<void> {
   for (const pool of pools) {
     if (!pool.accounts.length) continue;
     const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
-    const server = createProxy(pool, config.proxy.clientToken, persist); servers.push(server);
+    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity()); servers.push(server);
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
     // Past startup, a socket-level error must never end the process: the relay
     // is the only route its clients have, and killing it over one bad socket
@@ -47,7 +47,7 @@ export async function runServer(): Promise<void> {
     // Failures here are not fatal: a port taken by something else just means
     // that one legacy address is unavailable, not that the proxy cannot serve.
     for (const legacy of legacyPorts(config, pool.provider.id)) {
-      const alias = createProxy(pool, config.proxy.clientToken, persist);
+      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity());
       try {
         await new Promise<void>((resolve, reject) => { alias.once('error', reject); alias.listen(legacy, config.proxy.host, () => { alias.removeListener('error', reject); resolve(); }); });
         servers.push(alias);

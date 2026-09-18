@@ -17,14 +17,25 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
 function incomingHeaders(req: IncomingMessage): Headers { const headers = new Headers(); for (const [k, v] of Object.entries(req.headers)) { if (Array.isArray(v)) v.forEach((x) => headers.append(k, x)); else if (v !== undefined) headers.set(k, v); } return headers; }
 function sessionKey(req: IncomingMessage, body: Buffer): string { const explicit = req.headers['session_id'] || req.headers['conversation_id']; if (explicit) return String(explicit); try { const value = JSON.parse(body.toString()) as Record<string, unknown>; return String(value.previous_response_id || value.prompt_cache_key || req.socket.remotePort || randomUUID()); } catch { return String(req.socket.remotePort || randomUUID()); } }
 
-export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void): Server {
+export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number): Server {
   return createServer(async (req, res) => {
     try {
       if (!authorized(req, clientToken)) return json(res, 401, { error: 'Unauthorized local client' });
       const path = pool.provider.normalizePath(req.url || '/');
       if (!path) return json(res, 404, { error: 'Unsupported proxy path' });
-      const body = await readBody(req);
-      await dispatch(req, res, body, path, pool, sessionKey(req, body), onChange);
+      // Admission control: reject before buffering a body. localhost is trusted,
+      // so a flood of local clients could otherwise pin one 32 MB buffer each.
+      // The counter lives on the pool so the main port and its legacy aliases
+      // share one budget. Drain the request first or the socket leaks.
+      if (capacity && pool.inFlightProxied >= capacity()) {
+        req.resume();
+        return json(res, 429, { error: `${pool.provider.label} relay is at capacity` }, { 'retry-after': '5', 'x-teamai-429-reason': 'concurrency_saturated' });
+      }
+      pool.inFlightProxied++;
+      try {
+        const body = await readBody(req);
+        await dispatch(req, res, body, path, pool, sessionKey(req, body), onChange);
+      } finally { pool.inFlightProxied--; }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
   });
 }
@@ -36,7 +47,13 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? true;
   while (!res.destroyed) {
     const account = pool.acquire(session, excluded, wantsFable);
-    if (!account) return json(res, 429, { error: `No ${pool.provider.label} account is currently available` });
+    if (!account) {
+      // Distinguish "every account is busy right now" (retry) from "no account
+      // has budget left" (wait for a reset) so the caller — and the logs — know
+      // which one they hit.
+      const reason = pool.saturatedButHealthy(excluded) ? 'concurrency_saturated' : 'quota_exhausted';
+      return json(res, 429, { error: `No ${pool.provider.label} account is currently available` }, { 'x-teamai-429-reason': reason });
+    }
     let response: Response;
     try {
       await pool.refresh(account);
@@ -92,4 +109,4 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
 // was never compressed (BrotliDecompressionError). content-length is dropped
 // for the same reason: it describes the compressed length.
 function copyHeaders(response: Response, res: ServerResponse): void { for (const [key, value] of response.headers) if (!['connection', 'transfer-encoding', 'content-length', 'content-encoding'].includes(key)) res.setHeader(key, value); }
-function json(res: ServerResponse, status: number, value: unknown): void { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); }
+function json(res: ServerResponse, status: number, value: unknown, headers?: Record<string, string>): void { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(JSON.stringify(value)); }
