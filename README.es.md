@@ -168,6 +168,25 @@ por la semanal). Una cuenta sin medir se ordena al final (desconocido no es lo
 mismo que vacío), una prioridad fijada sigue teniendo precedencia, y `c` alterna
 de vuelta al orden configurado.
 
+**Enrutamiento según el modelo.** Solo el modelo superior (el nivel Fable de
+Claude) consume la ventana semanal por modelo, así que una solicitud que no lo
+necesita —Opus, Sonnet, Haiku— se desvía de las cuentas que todavía tienen
+presupuesto Fable hacia las cuentas cuya ventana Fable ya está agotada (en
+`fableReserveThreshold` o por encima), ordenadas dentro de ese grupo por su
+ventana semanal general. Así se reserva el escaso presupuesto Fable de cada
+cuenta para las solicitudes que de verdad lo necesitan y se aprovecha el margen
+semanal que de otro modo quedaría ocioso. Cuando no hay ninguna cuenta agotada
+disponible, la solicitud recae en una reservada en lugar de fallar. Una
+solicitud Fable conserva el orden normal de menor consumo; pon
+`fableReserveThreshold` en `1` para desactivar la separación.
+
+Un 429 de nivel Fable (`7d_oi` rechazada mientras las ventanas compartidas
+`5h`/`7d` siguen permitidas) solo limita la ventana Fable de esa cuenta, no la
+cuenta: todos los demás modelos se siguen atendiendo desde ella, en vez de que
+la cuenta entera quede inactiva hasta una semana por un presupuesto que solo
+consume el modelo superior. Un 429 que rechaza una ventana compartida limita la
+cuenta como de costumbre.
+
 La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente las ventanas `5h session`, `7d overall` y la ventana por modelo `7d Fable`; las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
 
 El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan y, en rojo, los estados de suscripción problemáticos como `past_due`.
@@ -175,6 +194,12 @@ El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: la
 `R` vuelve a medir la cuota de toda la flota. La cuota nunca se consulta desde un endpoint aparte: se aprende de los encabezados de límite de tasa que devuelve el upstream, así que una cuenta que no ha atendido tráfico muestra `-` hasta que algo la mida. `R` reproduce en paralelo una forma de solicitud que ya se sabe aceptada contra cada cuenta inactiva (incluidas las ya medidas y las limitadas, cuyos 429 igualmente traen encabezados autoritativos) e informa un recuento honesto de `measured/targets`. Esa forma de solicitud solo se fija a partir de un 2xx real que haya pasado por el proxy, de modo que hasta que una solicitud no haya tenido éxito, `R` informa que todavía no existe una plantilla de sondeo en lugar de adivinar una carga útil. Las cuentas a las que les falta la ventana semanal por modelo (Fable) reciben un sondeo complementario adicional, porque esa ventana solo aparece en las respuestas a solicitudes de nivel Fable.
 
 El servidor además hace un calentamiento por su cuenta cada cinco minutos (`warmupIntervalMs`, `0` para desactivarlo): limpia las ventanas de cuota que el upstream ya reinició y mide únicamente las cuentas sin medir, de modo que una flota estable no cuesta nada por ciclo y una ventana que se renueva se rellena sin que nadie pulse `R`. Una cuenta cuyo upstream nunca reporta cuota se descarta tras tres intentos infructuosos, y ese presupuesto se renueva cada vez que su ventana se reinicia o pulsas `R`.
+
+Las cuentas inactivas se mantienen vivas en el mismo ciclo de cinco minutos: cualquier cuenta cuyo token esté por vencer o cuyo último intento haya dado error se refresca, de a una por vez. El tráfico normal se concentra en unas pocas cuentas y el calentamiento a propósito nunca refresca, así que sin esto una cuenta que nadie usa podría dejar caducar su cadena de refresh-token y que el upstream la invalide. El barrido es secuencial a propósito: refrescar toda la flota de golpe tras una caída prolongada dispararía el endpoint de tokens contra un límite de tasa.
+
+La cuota aprendida (uso, ventanas, tiempos de reinicio, perfil de suscripción) se escribe en disco y se restaura en el siguiente arranque, de modo que el panel y el orden sobreviven a un reinicio sin volver a medir; la forma de sondeo que reproduce `R` se persiste igual. Las señales por respuesta no: un enfriamiento o un error se descartan a propósito al reiniciar, así una cuenta nunca vuelve a quedar limitada por el retry-after de un 429 obsoleto; si de verdad está agotada, la siguiente solicitud vuelve a deducir el estado correcto.
+
+Si llegan a la vez más solicitudes de las que puede atender la concurrencia combinada por cuenta de la flota, el relé rechaza el excedente con `429` (`x-teamai-429-reason: concurrency_saturated`) antes de leer el cuerpo de la solicitud, en lugar de almacenar cuerpos sin límite. Ese mismo encabezado distingue una flota ocupada de una agotada (`quota_exhausted`) en el 429 de "no hay cuenta disponible".
 
 El valor de suscripción `~D-N` es una estimación, no una fecha de vencimiento autoritativa: el endpoint de perfil de Anthropic expone el estado de la suscripción y la fecha de creación, pero no el fin del periodo de facturación actual. Por eso TeamAI estima el siguiente aniversario mensual de facturación y lo marca con `~`. El estado del perfil se actualiza al arrancar el servidor y cada seis horas.
 
@@ -196,9 +221,20 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |
 | `warmupIntervalMs` | `300000` | Intervalo de remedición en segundo plano. `0` lo desactiva. |
 | `maxConcurrentPerAccount` | `3` | Solicitudes en curso permitidas por cuenta. |
+| `fableReserveThreshold` | `0.8` | Uso de la ventana Fable a partir del cual la cuenta se prefiere para solicitudes que no son Fable. `1` desactiva el enrutamiento según el modelo. |
+| `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 
 Cambia un puerto si otro proceso ya lo ocupa: esa es la causa habitual de un
 arranque fallido, y el motivo aparece en `server-start.log`.
+
+Al cliente se le entrega su URL base al arrancar y ya no se puede redirigir
+después, así que mover un puerto en `config.json` dejaría, de otro modo, sin
+conexión a toda sesión ya abierta con «connection refused». Por eso el relé
+también responde en el puerto por defecto integrado y en cualquier
+`proxy.legacyPorts` que indiques, manteniendo vivas las sesiones abiertas al
+cambiar de puerto. Un puerto heredado que ya esté ocupado por otro proceso se
+omite sin afectar al puerto principal, y un error de socket posterior al
+arranque se registra en lugar de dejar que tumbe el relé.
 
 ## Alcance y cumplimiento
 
