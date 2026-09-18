@@ -103,7 +103,7 @@ test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy
     assert.equal(res.status, 429);
     assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
     const body = JSON.parse(await res.text()) as { error: string };
-    assert.match(body.error, /1 over the 98% session limit/);
+    assert.match(body.error, /1 used up the session window/);
   } finally { proxy.close(); }
 });
 
@@ -120,10 +120,10 @@ test('acquire-null 429 for a Fable request names the spent Fable budgets, the ea
   const events: string[] = [];
   const now = Date.now();
   // a: Fable weekly spent, rolls over in ~3 days. b: still has Fable but its
-  // session window is at the switch threshold and resets in ~9 minutes.
+  // session window is fully used and resets in ~9 minutes.
   pool.accounts[0]!.windows = { '7d_oi': { usage: 1, resetsAt: now + 3 * 24 * 3_600_000 }, '5h': { usage: 0.1, resetsAt: now + 3_600_000 } };
-  pool.accounts[1]!.windows = { '7d_oi': { usage: 0.6, resetsAt: now + 6 * 24 * 3_600_000 }, '5h': { usage: 0.98, resetsAt: now + 9 * 60_000 } };
-  pool.accounts[1]!.usage = 0.98; pool.accounts[1]!.resetsAt = now + 9 * 60_000;
+  pool.accounts[1]!.windows = { '7d_oi': { usage: 0.6, resetsAt: now + 6 * 24 * 3_600_000 }, '5h': { usage: 1, resetsAt: now + 9 * 60_000 } };
+  pool.accounts[1]!.usage = 1; pool.accounts[1]!.resetsAt = now + 9 * 60_000;
   const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
   const call = (model: string) => fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: JSON.stringify({ model }) });
@@ -133,7 +133,7 @@ test('acquire-null 429 for a Fable request names the spent Fable budgets, the ea
     assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
     assert.equal(res.headers.get('retry-after'), '540');
     const body = JSON.parse(await res.text()) as { error: string };
-    assert.match(body.error, /^No Claude account can serve Fable right now \(2 accounts: 1 spent the Fable weekly budget, 1 over the 98% session limit\)\./);
+    assert.match(body.error, /^No Claude account can serve Fable right now \(2 accounts: 1 spent the Fable weekly budget, 1 used up the session window\)\./);
     assert.match(body.error, /Earliest reset in 9m: b@example\.com session\./);
     assert.match(body.error, /Other models are still served/);
     assert.ok(events.some((e) => /429 quota_exhausted \(fable\), next reset 9m/.test(e)), `activity log should record the 429: ${events.join(' | ')}`);
@@ -216,5 +216,36 @@ test('a client that disconnects mid-stream releases its account slot and tears d
     while ((account.inflight > 0 || !upstreamClosed) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
     assert.equal(account.inflight, 0, 'inflight slot must be released after the client aborts');
     assert.equal(upstreamClosed, true, 'upstream stream must be cancelled, not left generating into the void');
+  } finally { proxy.close(); upstream.close(); }
+});
+
+test('an account over the switch threshold still serves when no other account can', async () => {
+  // 98% is where the pool prefers to switch, not a promise to strand the last
+  // 2%. With every alternative spent, the request goes upstream on the account
+  // over the threshold instead of being refused on a number we chose ourselves.
+  const upstream = createServer(async (req, res) => { req.resume(); await new Promise<void>((r) => req.once('end', r)); res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n'); });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = {
+    id: 'claude', label: 'Claude', upstreamBase: `http://127.0.0.1:${up.port}`,
+    normalizePath: () => '/v1/messages', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }),
+    usesFableBudget: (_path, body) => /fable/i.test(body.toString()),
+  };
+  const stored = (id: string): StoredAccount => ({ id, provider: 'claude', label: `${id}@example.com`, enabled: true, priority: null, credentialId: id, createdAt: '' });
+  const credential = (id: string): OAuthCredential => ({ accessToken: 's', refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [stored('a'), stored('b')], { a: credential('a'), b: credential('b') }, { version: 1, accounts: {} });
+  const now = Date.now();
+  pool.accounts[0]!.windows = { '7d_oi': { usage: 1, resetsAt: now + 3 * 24 * 3_600_000 } };
+  pool.accounts[1]!.windows = { '7d_oi': { usage: 0.6, resetsAt: now + 6 * 24 * 3_600_000 }, '5h': { usage: 0.98, resetsAt: now + 9 * 60_000 } };
+  pool.accounts[1]!.usage = 0.98; pool.accounts[1]!.resetsAt = now + 9 * 60_000;
+  const events: string[] = [];
+  const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-fable-5-1' }) });
+    await res.text();
+    assert.equal(res.status, 200, 'must not refuse while b still has 2% of its window');
+    assert.ok(events.some((e) => /→ b@example\.com 200/.test(e)), `request should have gone upstream on b: ${events.join(' | ')}`);
+    assert.equal(pool.accounts[1]!.inflight, 0);
   } finally { proxy.close(); upstream.close(); }
 });

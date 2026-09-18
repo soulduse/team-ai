@@ -125,8 +125,8 @@ export class AccountPool {
     return this.maxConcurrent > 0 && account.inflight >= this.maxConcurrent;
   }
 
-  private available(account: RuntimeAccount, excluded: Set<string>, wantsFable = true): boolean {
-    return this.availableIgnoringConcurrency(account, excluded, wantsFable) && !this.atConcurrencyCap(account);
+  private available(account: RuntimeAccount, excluded: Set<string>, wantsFable = true, lastResort = false): boolean {
+    return this.availableIgnoringConcurrency(account, excluded, wantsFable, lastResort) && !this.atConcurrencyCap(account);
   }
 
   // Everything available() checks except the concurrency slot. Splitting it out
@@ -138,10 +138,18 @@ export class AccountPool {
   // upstream call and a failover hop before moving on. A non-Fable request still
   // considers it — that budget is exactly what the account has left. Note this
   // is fully spent, not `fableReserve`: at 80% there is still Fable to spend.
-  private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>, wantsFable = true): boolean {
+  //
+  // The switch threshold (98%) is the point at which the pool prefers another
+  // account, not a promise to leave the remainder unused. When nothing else can
+  // take the request, `lastResort` admits an account that is over the
+  // threshold but not measured as fully spent (<100%): upstream still answers
+  // there, and if it does not, its 429 carries the real retry-after that
+  // benches the account — better than refusing on a number we chose ourselves.
+  private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>, wantsFable = true, lastResort = false): boolean {
     const now = Date.now();
     if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; }
-    if (!(account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < this.threshold))) return false;
+    const limit = lastResort ? 1 : this.threshold;
+    if (!(account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < limit))) return false;
     if (wantsFable && AccountPool.fableSpent(account, 1)) return false;
     return true;
   }
@@ -150,7 +158,7 @@ export class AccountPool {
   // merely at its concurrency cap: the request should be told to retry, not that
   // the fleet is out of quota.
   saturatedButHealthy(excluded: Set<string> = new Set()): boolean {
-    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded) && this.atConcurrencyCap(a));
+    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded, true, true) && this.atConcurrencyCap(a));
   }
 
   // Why acquire() just came back empty, worded for the client that is about
@@ -170,13 +178,13 @@ export class AccountPool {
     for (const account of live) {
       const fable = AccountPool.fableWindow(account);
       if (wantsFable && AccountPool.fableSpent(account, 1)) { fableSpent++; if (fable?.resetsAt) resets.push({ at: fable.resetsAt, label: `${account.label} Fable weekly` }); continue; }
-      if (account.usage !== null && account.usage >= this.threshold) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} session` }); continue; }
+      if (account.usage !== null && account.usage >= 1) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} session` }); continue; }
       if (account.cooldownUntil && account.cooldownUntil > now) { coolingDown++; resets.push({ at: account.cooldownUntil, label: `${account.label} cooldown` }); }
     }
     const next = resets.filter((r) => r.at > now).sort((a, b) => a.at - b.at)[0];
     const parts: string[] = [];
     if (fableSpent) parts.push(`${fableSpent} spent the Fable weekly budget`);
-    if (overLimit) parts.push(`${overLimit} over the ${Math.round(this.threshold * 100)}% session limit`);
+    if (overLimit) parts.push(`${overLimit} used up the session window`);
     if (coolingDown) parts.push(`${coolingDown} cooling down after an upstream rejection`);
     const what = wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
     const detail = parts.length ? ` (${live.length} accounts: ${parts.join(', ')})` : ` (${live.length} accounts)`;
@@ -214,11 +222,13 @@ export class AccountPool {
     // Opus turns onto the one account still holding Fable budget.
     if (pinned && this.available(pinned, excluded, wantsFable) && (wantsFable || !this.reservesFable(pinned))) { pinned.inflight++; return pinned; }
     const rank = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
-    const candidates = this.accounts.filter((a) => this.available(a, excluded, wantsFable)).sort((a, b) => {
+    const ranked = (lastResort: boolean) => this.accounts.filter((a) => this.available(a, excluded, wantsFable, lastResort)).sort((a, b) => {
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
       return rank(a, b);
     });
-    const selected = candidates[0] || null;
+    // Prefer accounts under the switch threshold; only when none is left does
+    // an account over it (but not spent) get the request rather than a 429.
+    const selected = ranked(false)[0] || ranked(true)[0] || null;
     if (selected) { selected.inflight++; this.affinity.set(session, selected.id); }
     return selected;
   }
