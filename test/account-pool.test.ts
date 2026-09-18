@@ -53,12 +53,40 @@ test('selects the least-spent account, judged on the Fable window when present',
   assert.equal(pool.acquire('s1')?.id, 'b');
 });
 
-test('a fleet with every Fable window spent still orders by the weekly window', () => {
-  const stored = ['x', 'y'].map((id) => account(id));
-  const credentials = { 'codex:x': credential('x'), 'codex:y': credential('y') };
-  const spentFable = (overall: number) => ({ usage: overall, resetsAt: null, windows: { '7d_oi': { usage: 1, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
-  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:x': spentFable(0.8), 'codex:y': spentFable(0.3) } });
-  assert.equal(pool.acquire('s1')?.id, 'y');
+test('a fully spent fleet is ordered by which account frees up soonest', () => {
+  const stored = ['later', 'sooner'].map((id) => account(id));
+  const credentials = { 'codex:later': credential('later'), 'codex:sooner': credential('sooner') };
+  const hour = 60 * 60_000;
+  // Deliberately gives the LATER account the lower weekly usage: once both are
+  // spent, time-to-reset is what matters, not who used less getting there.
+  const spent = (resetsIn: number, weekly: number) => ({ usage: weekly, resetsAt: Date.now() + resetsIn, windows: { '7d_oi': { usage: 1, resetsAt: Date.now() + resetsIn } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:later': spent(100 * hour, 0.3), 'codex:sooner': spent(12 * hour, 0.9) } });
+  assert.equal(pool.acquire('s1')?.id, 'sooner');
+});
+
+test('a near-spent Codex fleet ranks on its own main window reset', () => {
+  const stored = ['a', 'b'].map((id) => account(id));
+  const credentials = { 'codex:a': credential('a'), 'codex:b': credential('b') };
+  const hour = 60 * 60_000;
+  // Just under switchThreshold, so both remain selectable and the comparison
+  // is the reset time rather than availability.
+  const nearlySpent = (resetsIn: number) => ({ usage: 0.97, resetsAt: null, windows: { primary: { usage: 0.97, resetsAt: Date.now() + resetsIn } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:a': nearlySpent(120 * hour), 'codex:b': nearlySpent(48 * hour) } });
+  assert.equal(pool.acquire('s1')?.id, 'b');
+});
+
+test('byHeadroom still orders accounts the pool would refuse to route to', () => {
+  // The dashboard ranks every account, including ones past the threshold, so
+  // the comparator itself must order a fully spent fleet by reset time.
+  const hour = 60 * 60_000;
+  const spent = (id: string, resetsIn: number) => ({
+    ...account(id), credential: credential(id), usage: 1, resetsAt: Date.now() + resetsIn,
+    windows: { primary: { usage: 1, resetsAt: Date.now() + resetsIn } },
+    profile: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0,
+  });
+  const later = spent('later', 120 * hour); const sooner = spent('sooner', 48 * hour);
+  assert.ok(AccountPool.byHeadroom(sooner, later) < 0);
+  assert.ok(AccountPool.byHeadroom(later, sooner) > 0);
 });
 
 test('an unmeasured account sorts last, not first', () => {

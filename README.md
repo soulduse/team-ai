@@ -98,8 +98,10 @@ Accounts are ordered by how much quota they have left, least-spent first, in
 both the dashboard and the pool's own selection — so the top row is the account
 the next request would go to. Claude is judged on its model-weekly (Fable)
 window rather than the overall one, because that is what actually refuses the
-top model first; when every Fable window is spent the order falls through to
-the weekly window, which still differs widely between accounts. An unmeasured
+top model first. Once every account is spent they all tie, and the order falls
+through to whichever frees up soonest — on a fleet where nothing can serve a
+request today, time-to-reset is the only thing that separates them (Claude on
+its Fable window, Codex on its weekly one). An unmeasured
 account sorts last (unknown is not the same as empty), a pinned priority still
 wins, and `c` toggles back to configured order.
 

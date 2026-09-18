@@ -93,17 +93,22 @@ export async function runTui(): Promise<void> {
         // Mirrors AccountPool.byHeadroom so the top row is the account the pool
         // would actually pick next: the Fable window when upstream reports one,
         // the routing window otherwise, unmeasured last.
-        const spent = (account: StoredAccount): { primary: number | null; overall: number } => {
+        // Mirrors AccountPool.byHeadroom: least-spent first on the binding
+        // window (Claude's Fable bucket, Codex's main one), then — once they
+        // all tie at spent — whichever frees up soonest.
+        const rank = (account: StoredAccount): { usage: number | null; resetsAt: number | null } => {
           const saved = state.accounts[account.credentialId];
-          const fable = Object.entries(saved?.windows || {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1];
-          return { primary: fable?.usage ?? saved?.usage ?? null, overall: saved?.usage ?? 1 };
+          const windows = saved?.windows || {};
+          const binding = Object.entries(windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]
+            ?? windows.primary ?? windows.requests ?? windows['7d'];
+          return { usage: binding?.usage ?? saved?.usage ?? null, resetsAt: binding?.resetsAt ?? saved?.resetsAt ?? null };
         };
         group.sort((a, b) => {
           if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
-          const sa = spent(a); const sb = spent(b);
-          if (sa.primary === null || sb.primary === null) return (sa.primary === null ? 1 : 0) - (sb.primary === null ? 1 : 0);
-          if (sa.primary !== sb.primary) return sa.primary - sb.primary;
-          return sa.overall - sb.overall;
+          const ra = rank(a); const rb = rank(b);
+          if (ra.usage === null || rb.usage === null) return (ra.usage === null ? 1 : 0) - (rb.usage === null ? 1 : 0);
+          if (ra.usage !== rb.usage) return ra.usage - rb.usage;
+          return (ra.resetsAt ?? Number.MAX_SAFE_INTEGER) - (rb.resetsAt ?? Number.MAX_SAFE_INTEGER);
         });
       }
       const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;

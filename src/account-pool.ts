@@ -21,8 +21,15 @@ export class AccountPool {
   // sit at 50% overall and still refuse the top model at 100% — so it wins when
   // present, falling back to whatever routing window was measured.
   static headroomUsage(account: { usage: number | null; windows: Record<string, { usage: number | null }> }): number | null {
+    return AccountPool.bindingWindow(account)?.usage ?? account.usage;
+  }
+
+  // The window that decides when this account becomes usable again: Claude's
+  // model-weekly (Fable) bucket, or the provider's main window otherwise. Both
+  // ranking and the dashboard read the same one so they cannot disagree.
+  static bindingWindow(account: { windows: Record<string, { usage: number | null; resetsAt?: number | null }> }): { usage: number | null; resetsAt?: number | null } | undefined {
     const fable = Object.entries(account.windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1];
-    return fable?.usage ?? account.usage;
+    return fable ?? account.windows.primary ?? account.windows.requests ?? account.windows['7d'];
   }
 
   // Least-spent first, so both selection and the dashboard agree on what "next"
@@ -32,12 +39,14 @@ export class AccountPool {
     const ua = AccountPool.headroomUsage(a); const ub = AccountPool.headroomUsage(b);
     if (ua === null || ub === null) return (ua === null ? 1 : 0) - (ub === null ? 1 : 0);
     if (ua !== ub) return ua - ub;
-    // A spent Fable window ties every account at 100% while their overall
-    // budgets still differ widely, so fall through to the routing window —
-    // otherwise the order says nothing once the top model runs out.
-    const oa = a.usage ?? 1; const ob = b.usage ?? 1;
-    if (oa !== ob) return oa - ob;
-    return (a.resetsAt ?? Number.MAX_SAFE_INTEGER) - (b.resetsAt ?? Number.MAX_SAFE_INTEGER);
+    // Spent accounts all tie at 100%, and among those the only thing that
+    // matters is which one frees up first — a weekly figure of 50% vs 58% says
+    // nothing when neither can serve a request today. Rank by the binding
+    // window's reset instead: soonest first.
+    const ra = AccountPool.bindingWindow(a)?.resetsAt ?? a.resetsAt;
+    const rb = AccountPool.bindingWindow(b)?.resetsAt ?? b.resetsAt;
+    if (ra !== rb) return (ra ?? Number.MAX_SAFE_INTEGER) - (rb ?? Number.MAX_SAFE_INTEGER);
+    return (a.usage ?? 1) - (b.usage ?? 1);
   }
 
   private available(account: RuntimeAccount, excluded: Set<string>): boolean {
