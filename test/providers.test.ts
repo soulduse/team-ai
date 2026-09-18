@@ -101,13 +101,41 @@ test('claude routes only Fable models to the Fable budget', () => {
 
 test('a Fable-only 429 benches the model, not the account', () => {
   const h = (extra: Record<string, string>) => new Headers({ 'retry-after': '480000', ...extra });
-  // Only the model-weekly window is rejected: other models still work here.
-  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-7d_oi-status': 'rejected' }), '').kind, 'model-quota');
-  // The 5h or overall weekly window is rejected: the whole account is spent.
-  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-5h-status': 'rejected' }), '').kind, 'quota');
-  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-7d-status': 'rejected' }), '').kind, 'quota');
-  // Mixed: a spent 5h window still benches the account even alongside Fable.
-  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-7d_oi-status': 'rejected', 'anthropic-ratelimit-unified-5h-status': 'rejected' }), '').kind, 'quota');
-  // No window named: a plain rate limit, retried rather than benched.
-  assert.equal(claudeProvider.classifyFailure(429, h({}), '').kind, 'transient');
+  const kind = (extra: Record<string, string>) => claudeProvider.classifyFailure(429, h(extra), '').kind;
+
+  // The real shape of a Fable cap: upstream sets the TOP-LEVEL unified-status to
+  // rejected AND the 7d_oi window to rejected, while the shared 5h/7d windows
+  // stay allowed. The top-level bit must not be mistaken for the account being
+  // spent — the shared windows vouch that it still serves other models.
+  assert.equal(kind({
+    'anthropic-ratelimit-unified-status': 'rejected',
+    'anthropic-ratelimit-unified-7d_oi-status': 'rejected',
+    'anthropic-ratelimit-unified-5h-status': 'allowed',
+    'anthropic-ratelimit-unified-7d-status': 'allowed',
+  }), 'model-quota');
+
+  // A genuinely spent account: a shared window itself is rejected.
+  assert.equal(kind({
+    'anthropic-ratelimit-unified-status': 'rejected',
+    'anthropic-ratelimit-unified-5h-status': 'rejected',
+    'anthropic-ratelimit-unified-7d-status': 'allowed',
+  }), 'quota');
+  assert.equal(kind({
+    'anthropic-ratelimit-unified-status': 'rejected',
+    'anthropic-ratelimit-unified-7d-status': 'rejected',
+  }), 'quota');
+
+  // Fable rejected but the shared 5h is ALSO rejected → whole account is spent.
+  assert.equal(kind({
+    'anthropic-ratelimit-unified-7d_oi-status': 'rejected',
+    'anthropic-ratelimit-unified-5h-status': 'rejected',
+    'anthropic-ratelimit-unified-7d-status': 'allowed',
+  }), 'quota');
+
+  // Only the top-level bit, no shared window to vouch for the account → the safe
+  // reading is to bench the whole account.
+  assert.equal(kind({ 'anthropic-ratelimit-unified-status': 'rejected' }), 'quota');
+
+  // No rejected status at all: a plain rate limit, retried rather than benched.
+  assert.equal(kind({}), 'transient');
 });

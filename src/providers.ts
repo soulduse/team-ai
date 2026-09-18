@@ -82,18 +82,26 @@ export const claudeProvider: Provider = {
     if (status === 401) return { kind: 'auth', retryAfterMs: 0 };
     if (status === 403) return { kind: 'forbidden', retryAfterMs: 30 * 60_000 };
     if (status === 429) {
-      const rejectedWindows = [...headers]
-        .filter(([key, value]) => key.startsWith('anthropic-ratelimit-unified-') && key.endsWith('-status') && value === 'rejected')
-        .map(([key]) => /^anthropic-ratelimit-unified-(.+)-status$/i.exec(key)?.[1] ?? '');
-      if (!rejectedWindows.length) return { kind: 'transient', retryAfterMs: retryAfter(headers) };
-      // Only the model-weekly window is spent: the account can still serve every
-      // other model, so it must not be benched until that window resets. Taking
-      // the weekly retry-after here idles an account for days over a budget that
-      // only the top model draws on — with a pool of eight that is how seven
-      // accounts sit in cooldown at 0% of their 5h window while the one that is
-      // left absorbs the whole workload and 429s.
-      const onlyFable = rejectedWindows.every((name) => /^7d_[a-z0-9]+$/i.test(name));
-      if (onlyFable) return { kind: 'model-quota', retryAfterMs: retryAfter(headers) };
+      // A rejected status can appear on a named window (5h, 7d, 7d_oi, …) OR on
+      // the top-level `unified-status`, which has no window suffix. A real Fable
+      // 429 carries BOTH the top-level rejected AND `7d_oi-status: rejected`
+      // while the shared 5h/7d windows stay `allowed`. So the top-level bit
+      // alone cannot say whether the whole account is spent — only the shared
+      // windows can. Judge on those: if the response names a shared window and
+      // none of them is rejected, the rejection is the Fable family's and the
+      // account still serves every other model.
+      const statusOf = (name: string): string | null => headers.get(`anthropic-ratelimit-unified-${name}-status`);
+      const anyRejected = [...headers].some(([key, value]) => key.startsWith('anthropic-ratelimit-unified-') && key.endsWith('-status') && value === 'rejected');
+      if (!anyRejected) return { kind: 'transient', retryAfterMs: retryAfter(headers) };
+      const s5h = statusOf('5h'); const s7d = statusOf('7d');
+      const fableRejected = [...headers].some(([key, value]) => /^anthropic-ratelimit-unified-7d_[a-z0-9]+-status$/i.test(key) && value === 'rejected');
+      // A shared window explicitly said rejected → the account itself is spent.
+      if (s5h === 'rejected' || s7d === 'rejected') return { kind: 'quota', retryAfterMs: retryAfter(headers) };
+      // The Fable window is rejected and the shared windows (if reported) are
+      // not → bench the Fable window only, keep the account for other models.
+      if (fableRejected && (s5h !== null || s7d !== null)) return { kind: 'model-quota', retryAfterMs: retryAfter(headers) };
+      // Only the top-level bit is rejected with no shared window to vouch for the
+      // account: fall back to the safe reading and bench the whole account.
       return { kind: 'quota', retryAfterMs: retryAfter(headers) };
     }
     if (status >= 500) return { kind: 'transient', retryAfterMs: 1_000 };
