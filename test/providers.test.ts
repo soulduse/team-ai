@@ -97,6 +97,9 @@ test('claude routes only Fable models to the Fable budget', () => {
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.from('not json')), true);
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.alloc(0)), true);
   assert.equal(claudeProvider.usesFableBudget!('/v1/models', body('claude-opus-5')), true);
+  // The path arrives as Claude Code sends it, query string included.
+  assert.equal(claudeProvider.usesFableBudget!('/v1/messages?beta=true', body('claude-opus-5')), false);
+  assert.equal(claudeProvider.usesFableBudget!('/v1/messages?beta=true', body('claude-fable-5-1')), true);
 });
 
 test('a Fable-only 429 benches the model, not the account', () => {

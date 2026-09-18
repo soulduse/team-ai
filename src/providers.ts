@@ -121,7 +121,9 @@ export const claudeProvider: Provider = {
   // keeps an unknown request on the existing behaviour rather than silently
   // spending an account that was being reserved.
   usesFableBudget(path, body) {
-    if (!path.endsWith('/messages') || body.length === 0) return true;
+    // Claude Code calls /v1/messages?beta=true; the query must not turn every
+    // request into a Fable one, or the model split never applies to real traffic.
+    if (!new URL(path, 'http://localhost').pathname.endsWith('/messages') || body.length === 0) return true;
     try {
       const parsed = JSON.parse(body.toString('utf8')) as { model?: unknown };
       if (typeof parsed.model !== 'string') return true;
