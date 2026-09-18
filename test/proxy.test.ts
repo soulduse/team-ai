@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
 import { createProxy } from '../src/proxy.js';
@@ -139,5 +139,44 @@ test('a transient 429 fails over without cooling down the account', async () => 
     const a = pool.accounts.find((x) => x.id === 'a')!;
     assert.equal(a.cooldownUntil, null, 'a transient 429 must not cool the account down');
     assert.equal(pool.acquire('next', new Set(), false)?.id, 'a', 'account a stays selectable right after a transient 429');
+  } finally { proxy.close(); upstream.close(); }
+});
+
+test('a client that disconnects mid-stream releases its account slot and tears down the upstream stream', async () => {
+  // Claude Code drops a streaming response whenever the user presses Esc, a
+  // tool is cancelled or the client retries. The proxy used to wait for a
+  // 'drain' that a destroyed response never emits, so every such abort leaked
+  // one inflight slot on the account until the process was restarted.
+  let upstreamClosed = false;
+  const upstream = createServer(async (req, res) => {
+    req.resume(); await new Promise<void>((r) => req.once('end', r));
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const tick = setInterval(() => { if (!res.destroyed) res.write(`data: ${'x'.repeat(4096)}\n\n`); }, 2);
+    res.once('close', () => { clearInterval(tick); upstreamClosed = true; });
+  });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: `http://127.0.0.1:${up.port}`,
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (incoming, account) => { const h = new Headers(incoming); h.set('authorization', `Bearer ${account.credential.accessToken}`); return h; },
+    classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }),
+  };
+  const stored: StoredAccount = { id: 'a', provider: 'codex', label: 'a', enabled: true, priority: 1, credentialId: 'a', createdAt: '' };
+  const state: PersistedState = { version: 1, accounts: {} };
+  const pool = new AccountPool(provider, [stored], { a: { accessToken: 's', refreshToken: null, expiresAt: null, accountId: 'a' } }, state, 0.98, 1);
+  const proxy = createProxy(pool, 'local-secret', () => {});
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    await new Promise<void>((resolve) => {
+      const req = request({ host: '127.0.0.1', port: pa.port, path: '/v1/responses', method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' } }, (res) => {
+        res.once('data', () => { req.destroy(); resolve(); });
+      });
+      req.on('error', () => {}); req.end('{}');
+    });
+    const account = pool.accounts[0]!;
+    const deadline = Date.now() + 2_000;
+    while ((account.inflight > 0 || !upstreamClosed) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(account.inflight, 0, 'inflight slot must be released after the client aborts');
+    assert.equal(upstreamClosed, true, 'upstream stream must be cancelled, not left generating into the void');
   } finally { proxy.close(); upstream.close(); }
 });

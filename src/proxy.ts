@@ -108,10 +108,30 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     copyHeaders(response, res); res.writeHead(response.status);
     try {
       if (!response.body) res.end();
-      else { const reader = response.body.getReader(); while (true) { const part = await reader.read(); if (part.done) break; if (!res.write(Buffer.from(part.value))) await new Promise<void>((resolve) => res.once('drain', resolve)); } res.end(); }
+      else await pipeStream(response.body, res);
     } finally { pool.release(account); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}`); }
     return;
   }
+}
+
+// Forward the upstream body chunk by chunk, honouring backpressure. The client
+// can vanish mid-stream (Esc, a cancelled tool, a retry): a destroyed response
+// returns false from write() and never emits 'drain', so waiting on drain alone
+// hung here forever and the account's inflight slot leaked until restart. On
+// close the upstream read is cancelled too, so the model stops generating into
+// the void instead of spending the account's quota on a response nobody reads.
+async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<void> {
+  const reader = body.getReader();
+  const closed = new Promise<void>((resolve) => { if (res.destroyed) resolve(); else res.once('close', () => resolve()); });
+  const onClose = () => { void reader.cancel().catch(() => {}); };
+  res.once('close', onClose);
+  try {
+    while (!res.destroyed) {
+      const part = await reader.read(); if (part.done) break;
+      if (!res.write(Buffer.from(part.value)) && !res.destroyed) await Promise.race([new Promise<void>((resolve) => res.once('drain', resolve)), closed]);
+    }
+    if (!res.destroyed) res.end();
+  } finally { res.removeListener('close', onClose); await reader.cancel().catch(() => {}); }
 }
 
 // fetch decompresses the upstream body transparently, so what we forward is
