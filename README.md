@@ -215,7 +215,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `proxy.clientToken` | generated | Local token every relayed client must send. |
 | `switchThreshold` | `0.98` | Usage ratio above which an account stops being selected. |
 | `warmupIntervalMs` | `300000` | Background re-measure interval. `0` disables it. |
-| `maxConcurrentPerAccount` | `3` | In-flight requests allowed per account. |
+| `maxConcurrentPerAccount` | `16` | In-flight requests allowed per account. `0` means unlimited. |
 | `fableReserveThreshold` | `0.8` | Fable-window usage at or above which an account is preferred for non-Fable requests. `1` turns model-aware routing off. |
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
 

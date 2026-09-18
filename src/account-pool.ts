@@ -17,7 +17,7 @@ export class AccountPool {
     return this.fableReserve < 1 && !AccountPool.fableSpent(account, this.fableReserve) && AccountPool.fableWindow(account)?.usage != null;
   }
 
-  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 3, readonly fableReserve = 0.8) {
+  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 16, readonly fableReserve = 0.8) {
     this.accounts = stored.filter((a) => a.provider === provider.id && credentials[a.credentialId]).map((account) => {
       const saved = state.accounts[account.credentialId];
       // Restore the long-lived quota state (usage/windows/reset/profile) so the
@@ -120,29 +120,44 @@ export class AccountPool {
   // buffering a body, so a flood of local clients cannot pin unbounded memory.
   inFlightProxied = 0;
 
-  private available(account: RuntimeAccount, excluded: Set<string>): boolean {
-    return this.availableIgnoringConcurrency(account, excluded) && account.inflight < this.maxConcurrent;
+  // A per-account concurrency cap of 0 means unlimited.
+  private atConcurrencyCap(account: RuntimeAccount): boolean {
+    return this.maxConcurrent > 0 && account.inflight >= this.maxConcurrent;
+  }
+
+  private available(account: RuntimeAccount, excluded: Set<string>, wantsFable = true): boolean {
+    return this.availableIgnoringConcurrency(account, excluded, wantsFable) && !this.atConcurrencyCap(account);
   }
 
   // Everything available() checks except the concurrency slot. Splitting it out
   // lets the pool tell "no slot free right now" (retry) apart from "no account
   // has budget left" (quota) without duplicating the eligibility rules.
-  private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>): boolean {
+  //
+  // A Fable request also skips an account whose Fable window is fully spent
+  // (100%): it can only answer with a 429 there, so trying it just burns a real
+  // upstream call and a failover hop before moving on. A non-Fable request still
+  // considers it — that budget is exactly what the account has left. Note this
+  // is fully spent, not `fableReserve`: at 80% there is still Fable to spend.
+  private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>, wantsFable = true): boolean {
     const now = Date.now();
     if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; }
-    return account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < this.threshold);
+    if (!(account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < this.threshold))) return false;
+    if (wantsFable && AccountPool.fableSpent(account, 1)) return false;
+    return true;
   }
 
   // acquire returned nothing but at least one account is otherwise healthy and
   // merely at its concurrency cap: the request should be told to retry, not that
   // the fleet is out of quota.
   saturatedButHealthy(excluded: Set<string> = new Set()): boolean {
-    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded) && a.inflight >= this.maxConcurrent);
+    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded) && this.atConcurrencyCap(a));
   }
 
   // The useful concurrent load this pool can carry: a live account contributes
-  // its cap, a disabled one only the requests still draining through it.
+  // its cap, a disabled one only the requests still draining through it. With an
+  // unlimited cap (0) admission control is off, so this is not consulted.
   totalCapacity(): number {
+    if (this.maxConcurrent <= 0) return Number.MAX_SAFE_INTEGER;
     return this.accounts.reduce((sum, a) => sum + (a.enabled ? this.maxConcurrent : a.inflight), 0);
   }
 
@@ -156,9 +171,9 @@ export class AccountPool {
     // account. Honour it only while it agrees with what this request should
     // spend: a session that once asked for Fable must not keep dragging its
     // Opus turns onto the one account still holding Fable budget.
-    if (pinned && this.available(pinned, excluded) && (wantsFable || !this.reservesFable(pinned))) { pinned.inflight++; return pinned; }
+    if (pinned && this.available(pinned, excluded, wantsFable) && (wantsFable || !this.reservesFable(pinned))) { pinned.inflight++; return pinned; }
     const rank = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
-    const candidates = this.accounts.filter((a) => this.available(a, excluded)).sort((a, b) => {
+    const candidates = this.accounts.filter((a) => this.available(a, excluded, wantsFable)).sort((a, b) => {
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
       return rank(a, b);
     });

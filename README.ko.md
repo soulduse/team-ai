@@ -173,7 +173,7 @@ Fable 등급 429(`7d_oi`는 거절됐지만 공유 `5h`/`7d` 창은 아직 허�
 | `proxy.clientToken` | 자동 생성 | 릴레이되는 모든 클라이언트가 보내야 하는 로컬 토큰. |
 | `switchThreshold` | `0.98` | 이 사용률을 넘으면 해당 계정을 더 이상 선택하지 않음. |
 | `warmupIntervalMs` | `300000` | 백그라운드 재측정 주기. `0`이면 비활성화. |
-| `maxConcurrentPerAccount` | `3` | 계정당 동시 처리 요청 수. |
+| `maxConcurrentPerAccount` | `16` | 계정당 동시 처리 요청 수. `0`이면 무제한. |
 | `fableReserveThreshold` | `0.8` | 이 값 이상으로 Fable 창을 쓴 계정을 비-Fable 요청에 우선 배정. `1`이면 모델 인식 라우팅 비활성화. |
 | `proxy.legacyPorts` | — | 선택. 프로바이더별로 계속 응답할 추가 포트 — 예: `{ "claude": [3400] }`. |
 

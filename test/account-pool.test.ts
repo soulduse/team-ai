@@ -54,14 +54,42 @@ test('selects the least-spent account, judged on the Fable window when present',
 });
 
 test('a fully spent fleet is ordered by which account frees up soonest', () => {
-  const stored = ['later', 'sooner'].map((id) => account(id));
-  const credentials = { 'codex:later': credential('later'), 'codex:sooner': credential('sooner') };
+  // Ranking only — a Fable request would exclude both fully-spent accounts (see
+  // the skip test below), so this checks the comparator the dashboard uses.
   const hour = 60 * 60_000;
-  // Deliberately gives the LATER account the lower weekly usage: once both are
-  // spent, time-to-reset is what matters, not who used less getting there.
-  const spent = (resetsIn: number, weekly: number) => ({ usage: weekly, resetsAt: Date.now() + resetsIn, windows: { '7d_oi': { usage: 1, resetsAt: Date.now() + resetsIn } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
-  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:later': spent(100 * hour, 0.3), 'codex:sooner': spent(12 * hour, 0.9) } });
-  assert.equal(pool.acquire('s1')?.id, 'sooner');
+  const spent = (id: string, resetsIn: number, weekly: number) => ({
+    ...account(id), credential: credential(id), usage: weekly, resetsAt: Date.now() + resetsIn,
+    windows: { '7d_oi': { usage: 1, resetsAt: Date.now() + resetsIn } },
+    profile: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0,
+  });
+  // The LATER account has the lower weekly usage on purpose: once both are
+  // spent, time-to-reset decides, not who used less getting there.
+  const later = spent('later', 100 * hour, 0.3); const sooner = spent('sooner', 12 * hour, 0.9);
+  assert.ok(AccountPool.byHeadroom(sooner, later) < 0);
+  assert.ok(AccountPool.byHeadroom(later, sooner) > 0);
+});
+
+test('a Fable request skips accounts whose Fable window is fully spent', () => {
+  const stored = ['spent', 'has-fable'].map((id) => account(id));
+  const credentials = { 'codex:spent': credential('spent'), 'codex:has-fable': credential('has-fable') };
+  const win = (fable: number, weekly: number) => ({ usage: weekly, resetsAt: null, windows: { '7d': { usage: weekly, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:spent': win(1, 0.2), 'codex:has-fable': win(0.4, 0.9) } });
+  // Fable request: the 100%-Fable account is skipped even though its weekly is
+  // lower — it could only 429. The one with Fable left wins despite higher weekly.
+  assert.equal(pool.acquire('s1', new Set(), true)?.id, 'has-fable');
+  // Every account's Fable spent → a Fable request gets nothing rather than
+  // burning a real 429 on each.
+  const allSpent = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:spent': win(1, 0.2), 'codex:has-fable': win(1, 0.4) } });
+  assert.equal(allSpent.acquire('s2', new Set(), true), null);
+  // A non-Fable request still uses them — that spent-Fable budget is irrelevant.
+  assert.equal(allSpent.acquire('s3', new Set(), false)?.id, 'spent');
+});
+
+test('a per-account cap of 0 means unlimited concurrency', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state, 0.98, 0);
+  pool.accounts[0]!.inflight = 99;
+  assert.equal(pool.acquire('s')?.id, 'a', 'no cap should gate the account');
+  assert.equal(pool.totalCapacity(), Number.MAX_SAFE_INTEGER);
 });
 
 test('a near-spent Codex fleet ranks on its own main window reset', () => {

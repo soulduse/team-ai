@@ -223,7 +223,7 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `proxy.clientToken` | generado | Token local que debe enviar todo cliente que pase por el relé. |
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |
 | `warmupIntervalMs` | `300000` | Intervalo de remedición en segundo plano. `0` lo desactiva. |
-| `maxConcurrentPerAccount` | `3` | Solicitudes en curso permitidas por cuenta. |
+| `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
 | `fableReserveThreshold` | `0.8` | Uso de la ventana Fable a partir del cual la cuenta se prefiere para solicitudes que no son Fable. `1` desactiva el enrutamiento según el modelo. |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 

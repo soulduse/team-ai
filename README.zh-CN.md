@@ -173,7 +173,7 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `5h`／`7d` 窗口仍为允许�
 | `proxy.clientToken` | 自动生成 | 每个被中继的客户端都必须发送的本地令牌。 |
 | `switchThreshold` | `0.98` | 用量比例超过该值后，该账号不再被选中。 |
 | `warmupIntervalMs` | `300000` | 后台重新测量的间隔。`0` 表示禁用。 |
-| `maxConcurrentPerAccount` | `3` | 每个账号允许的并发在途请求数。 |
+| `maxConcurrentPerAccount` | `16` | 每个账号允许的并发在途请求数。设为 `0` 表示无限制。 |
 | `fableReserveThreshold` | `0.8` | 当账号的 Fable 窗口用量达到或超过该值时，优先把非 Fable 请求分给它。设为 1 关闭模型感知路由。 |
 | `proxy.legacyPorts` | — | 可选。按提供方继续应答的额外端口 — 例如 { "claude": [3400] }。 |
 
