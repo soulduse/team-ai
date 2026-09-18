@@ -1,6 +1,12 @@
 # TeamAI
 
+**English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [中文](README.zh-CN.md) · [Español](README.es.md)
+
 TeamAI is a local multi-account relay for **Claude Code** and the official **Codex CLI**. It keeps a separate account pool for each provider and retries a request with another account when the selected subscription is unavailable or out of quota.
+
+![TeamAI dashboard](docs/dashboard.png)
+
+<sub>The dashboard above is rendered by <a href="docs/render-dashboard.py">docs/render-dashboard.py</a> rather than captured, so no real account labels live in this repository.</sub>
 
 > TeamAI is an independent open-source project. It is not affiliated with Anthropic, OpenAI, or the unrelated service at teamai.com.
 
@@ -11,13 +17,29 @@ TeamAI is a local multi-account relay for **Claude Code** and the official **Cod
 - `claude` and/or `codex` installed separately
 - Your own Claude Pro/Max or ChatGPT Codex subscription accounts
 
-## Install for development
+## Install
+
+```bash
+git clone https://github.com/soulduse/team-ai.git
+cd team-ai
+./scripts/install.sh
+```
+
+`install.sh` installs dependencies, builds, links the `teamai`/`tai`/`tac`/`tax`
+commands, and offers to add the shell block. It is idempotent — re-run it to
+upgrade. Pass `--no-shell` to skip the shell block, or `--dry-run` to see what it
+would do.
+
+To do the same by hand:
 
 ```bash
 npm install
-npm run build
+npm run build          # required: dist/ is not committed
 npm link
 ```
+
+Automating this from an AI agent? See [AGENTS.md](AGENTS.md), which states the
+same steps as deterministic commands with verification and failure branches.
 
 ## Quick start
 
@@ -66,8 +88,39 @@ server (a port already in use, an unreadable credential file) is reported
 instead of a bare "did not start", and the full output is kept at
 `~/.config/teamai/server-start.log`.
 
-To run the relay as a login item instead of starting it on demand, point a
-LaunchAgent at `dist/src/cli.js server` with `RunAtLoad` and `KeepAlive`.
+### Running the relay as a login item
+
+This is optional. The `taistart`/`tairestart`/`taistop` aliases installed above
+drive a LaunchAgent labeled `com.teamai.proxy`, so use exactly that label:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.teamai.proxy.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>          <string>com.teamai.proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/ABSOLUTE/PATH/TO/team-ai/dist/src/cli.js</string>
+    <string>server</string>
+  </array>
+  <key>RunAtLoad</key>      <true/>
+  <key>KeepAlive</key>      <true/>
+  <key>StandardErrorPath</key> <string>/tmp/teamai.err.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.teamai.proxy.plist
+```
+
+Use `command -v node` for the real Node path; a LaunchAgent does not inherit
+your shell's PATH.
+
+## Accounts
 
 Codex uses its normal browser login flow. TeamAI does not require ChatGPT's optional device-code authentication setting to be enabled.
 
@@ -86,12 +139,16 @@ Recent Claude Code versions may store credentials in the macOS Keychain rather t
 ## Operations
 
 ```bash
-teamai status
-teamai start
+teamai status                                  # server state + account table
+teamai accounts [claude|codex]                 # account table only
+teamai start                                   # start relay, open dashboard
+teamai stop                                    # stop the relay
+teamai restart                                 # stop, start, open dashboard
+teamai server                                  # run the relay in the foreground
+teamai tui                                     # dashboard only, no auto-start
 teamai disable codex user@example.com
 teamai enable codex user@example.com
-teamai priority claude user@example.com 1
-teamai restart
+teamai priority claude user@example.com 1      # or: auto
 ```
 
 Accounts are ordered by how much quota they have left, least-spent first, in
@@ -105,7 +162,7 @@ its Fable window, Codex on its weekly one). An unmeasured
 account sorts last (unknown is not the same as empty), a pinned priority still
 wins, and `c` toggles back to configured order.
 
-The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the 5-hour session (`Ses`), overall weekly (`Wk`), and model-scoped Fable (`Fbl`) windows independently; Codex rows show its primary and secondary windows. Quotas are learned from official-client responses and retained across restarts.
+The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the `5h session`, `7d overall`, and model-scoped `7d Fable` windows independently; Codex rows show its primary and secondary windows, each titled with the span that account actually reports (`1w limit`). Quotas are learned from official-client responses and retained across restarts.
 
 The footer exposes the same account workflow as TeamClaude: launch Claude/Codex, select, switch, enable/disable, order, delete, add/login, re-measure (`R`), and quit. `switch` pins the selected account to the front of its provider pool; order mode can assign a rank or return an account to automatic scheduling. Claude profile refreshes show the plan tier and unhealthy subscription states such as `past_due` in red.
 
@@ -115,7 +172,27 @@ The server also warms up on its own every five minutes (`warmupIntervalMs`, 0 to
 
 The `~D-N` subscription value is an estimate, not an authoritative expiry date: Anthropic's profile endpoint exposes subscription status and creation time, but no current billing-period end. TeamAI therefore estimates the next monthly billing anniversary and marks it with `~`. Profile state is refreshed at server startup and every six hours.
 
-Configuration and credentials live under `~/.config/teamai` by default. Set `TEAMAI_HOME` to override it. The proxies bind to `127.0.0.1` and require a generated local client token.
+## Configuration
+
+Configuration and credentials live in `$TEAMAI_HOME`, falling back to
+`$XDG_CONFIG_HOME/teamai` and then `~/.config/teamai`. The proxies bind to
+`127.0.0.1` and require a generated local client token.
+
+`config.json` is created on first run with these defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `proxy.host` | `127.0.0.1` | Bind address. Loopback only by design. |
+| `proxy.claudePort` | `3456` | Claude relay port. |
+| `proxy.codexPort` | `3457` | Codex relay port. |
+| `proxy.controlPort` | `3556` | Control channel the TUI talks to. |
+| `proxy.clientToken` | generated | Local token every relayed client must send. |
+| `switchThreshold` | `0.98` | Usage ratio above which an account stops being selected. |
+| `warmupIntervalMs` | `300000` | Background re-measure interval. `0` disables it. |
+| `maxConcurrentPerAccount` | `3` | In-flight requests allowed per account. |
+
+Change a port if something else already owns it — that is the usual cause of a
+failed start, and the reason appears in `server-start.log`.
 
 ## Scope and compliance
 
