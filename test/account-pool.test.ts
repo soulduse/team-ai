@@ -291,3 +291,38 @@ test('a restart does not restore cooldown or error, but keeps quota', () => {
   // And the account is therefore immediately selectable, not parked.
   assert.equal(pool.acquire('s')?.id, 'a');
 });
+
+test('new sessions spread across accounts whose load is within the same 10% step', () => {
+  // Weekly figures a point apart (51%..57%) used to herd every new session onto
+  // the lowest one until its figure crept past the next — a tenth of a percent
+  // per request. Inside a 10% step the account with fewer requests in flight
+  // wins, so four sessions land on four accounts.
+  const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+  const pool = new AccountPool(provider, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: {} }, 0.98, 16);
+  const now = Date.now();
+  pool.accounts.forEach((a, i) => { a.windows = { '7d': { usage: 0.51 + i * 0.01, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 1, resetsAt: now + 86_400_000 }, '5h': { usage: 0, resetsAt: now + 3_600_000 } }; a.usage = 0.51 + i * 0.01; });
+  const picked = ['s1', 's2', 's3', 's4'].map((s) => pool.acquire(s, new Set(), false)!.id);
+  assert.equal(new Set(picked).size, 4, `four sessions should not share an account: ${picked.join(',')}`);
+  // The pinned session keeps its account across turns (prompt-cache locality).
+  pool.release(pool.accounts.find((a) => a.id === picked[0])!);
+  assert.equal(pool.acquire('s1', new Set(), false)!.id, picked[0]);
+});
+
+test('the 5-hour session window counts toward load, not just the weekly budget', () => {
+  // x is lighter on the week but its session window is nearly full; y is the
+  // one that can actually take more requests right now — for Opus and for Fable.
+  const pool = new AccountPool(provider, [account('x'), account('y')], { 'codex:x': credential('x'), 'codex:y': credential('y') }, { version: 1, accounts: {} }, 0.98, 16);
+  const now = Date.now();
+  pool.accounts[0]!.windows = { '7d': { usage: 0.4, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 0.6, resetsAt: now + 86_400_000 }, '5h': { usage: 0.95, resetsAt: now + 3_600_000 } }; pool.accounts[0]!.usage = 0.95;
+  pool.accounts[1]!.windows = { '7d': { usage: 0.5, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 0.7, resetsAt: now + 86_400_000 }, '5h': { usage: 0.1, resetsAt: now + 3_600_000 } }; pool.accounts[1]!.usage = 0.5;
+  assert.equal(pool.acquire('opus', new Set(), false)!.id, 'y');
+  assert.equal(pool.acquire('fable', new Set(), true)!.id, 'y');
+});
+
+test('a clearly lighter account still wins over a busier one with fewer requests in flight', () => {
+  const pool = new AccountPool(provider, [account('light'), account('heavy')], { 'codex:light': credential('light'), 'codex:heavy': credential('heavy') }, { version: 1, accounts: {} }, 0.98, 16);
+  const now = Date.now();
+  pool.accounts[0]!.windows = { '7d': { usage: 0.3, resetsAt: now + 86_400_000 } }; pool.accounts[0]!.usage = 0.3; pool.accounts[0]!.inflight = 3;
+  pool.accounts[1]!.windows = { '7d': { usage: 0.6, resetsAt: now + 86_400_000 } }; pool.accounts[1]!.usage = 0.6; pool.accounts[1]!.inflight = 0;
+  assert.equal(pool.acquire('s', new Set(), false)!.id, 'light');
+});

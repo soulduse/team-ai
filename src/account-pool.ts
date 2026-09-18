@@ -221,7 +221,7 @@ export class AccountPool {
     // spend: a session that once asked for Fable must not keep dragging its
     // Opus turns onto the one account still holding Fable budget.
     if (pinned && this.available(pinned, excluded, wantsFable) && (wantsFable || !this.reservesFable(pinned))) { pinned.inflight++; return pinned; }
-    const rank = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
+    const rank = this.spread(wantsFable);
     const ranked = (lastResort: boolean) => this.accounts.filter((a) => this.available(a, excluded, wantsFable, lastResort)).sort((a, b) => {
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
       return rank(a, b);
@@ -231,6 +231,36 @@ export class AccountPool {
     const selected = ranked(false)[0] || ranked(true)[0] || null;
     if (selected) { selected.inflight++; this.affinity.set(session, selected.id); }
     return selected;
+  }
+
+  // Selection order for a new session. The static rankings compare exact
+  // usage, which herds every new session onto whichever account is a point
+  // lower this hour (51% vs 52%) until its weekly figure creeps past the next
+  // one — a number that moves a tenth of a percent per request. Meanwhile the
+  // window that actually gates the account next is often the 5-hour session
+  // window, which the weekly figure never sees, so one account fills its
+  // session window alone while seven sit at 0%.
+  //
+  // So: keep the tier (non-Fable traffic still prefers a week with no Fable
+  // left to protect), compare load on the fuller of the weekly and session
+  // windows in 10% steps, and inside a step prefer the account with fewer
+  // requests in flight. Only then fall back to the exact ranking, so both the
+  // dashboard's order and the fleet-wide preference still hold.
+  private spread(wantsFable: boolean): (a: RuntimeAccount, b: RuntimeAccount) => number {
+    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
+    const tier = (a: RuntimeAccount) => (!wantsFable && this.fableReserve < 1 && AccountPool.fableSpent(a, this.fableReserve) ? 0 : 1);
+    const bucket = (a: RuntimeAccount) => { const load = AccountPool.loadUsage(a, wantsFable); return load === null ? Number.MAX_SAFE_INTEGER : Math.floor(load * 10); };
+    return (a, b) => tier(a) - tier(b) || bucket(a) - bucket(b) || a.inflight - b.inflight || exact(a, b);
+  }
+
+  // How full the account is on whichever window will gate its next request:
+  // the budget this kind of request spends, or the 5-hour session window,
+  // whichever is fuller. Null when neither has been measured.
+  static loadUsage(account: RuntimeAccount, wantsFable: boolean): number | null {
+    const budget = wantsFable ? AccountPool.headroomUsage(account) : AccountPool.generalUsage(account);
+    const session = account.windows['5h']?.usage ?? null;
+    if (budget === null && session === null) return null;
+    return Math.max(budget ?? 0, session ?? 0);
   }
 
   release(account: RuntimeAccount): void { account.inflight = Math.max(0, account.inflight - 1); account.lastUsed = Date.now(); }
