@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { loginClaude, loginCodex } from './auth.js';
 import { runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
-import type { StoredAccount, SubscriptionProfile } from './types.js';
+import type { PersistedState, StoredAccount, SubscriptionProfile } from './types.js';
 
 const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
 const color = (code: number, text: string): string => `${ESC}${code}m${text}${RESET}`;
@@ -71,6 +71,39 @@ function windowLabel(minutes: number | null | undefined, fallback: string): stri
   return `${minutes}m`;
 }
 
+// The accounts in the order the screen draws them: grouped by provider, and
+// within a group least-spent first unless the roster was switched back to
+// configured order. Everything that walks rows — rendering, ↑↓ movement, the
+// initial cursor — goes through this one function, so the cursor always lands
+// on the adjacent visible row rather than the adjacent entry in config.json.
+export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean): StoredAccount[] {
+  // Mirrors AccountPool.byHeadroom: least-spent first on the binding window
+  // (Claude's Fable bucket, Codex's main one), then — once they all tie at
+  // spent — whichever frees up soonest, unmeasured last, pinned priority first.
+  const rank = (account: StoredAccount): { usage: number | null; resetsAt: number | null } => {
+    const saved = state.accounts[account.credentialId];
+    const windows = saved?.windows || {};
+    const binding = Object.entries(windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]
+      ?? windows.primary ?? windows.requests ?? windows['7d'];
+    return { usage: binding?.usage ?? saved?.usage ?? null, resetsAt: binding?.resetsAt ?? saved?.resetsAt ?? null };
+  };
+  const ordered: StoredAccount[] = [];
+  for (const provider of ['claude', 'codex'] as const) {
+    const group = accounts.filter((account) => account.provider === provider);
+    if (byHeadroom) {
+      group.sort((a, b) => {
+        if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+        const ra = rank(a); const rb = rank(b);
+        if (ra.usage === null || rb.usage === null) return (ra.usage === null ? 1 : 0) - (rb.usage === null ? 1 : 0);
+        if (ra.usage !== rb.usage) return ra.usage - rb.usage;
+        return (ra.resetsAt ?? Number.MAX_SAFE_INTEGER) - (rb.resetsAt ?? Number.MAX_SAFE_INTEGER);
+      });
+    }
+    ordered.push(...group);
+  }
+  return ordered;
+}
+
 export async function runTui(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
   let selectedId: string | null = null; let mode: 'normal' | 'order' | 'delete' | 'add' = 'normal'; let message = ''; let busy = false; let closed = false;
@@ -78,39 +111,17 @@ export async function runTui(): Promise<void> {
   // account has room left", and that ordering answers it at a glance. 'c' puts
   // it back in configured order for anyone reading it as a roster.
   let sortByHeadroom = true;
-  const rows = async (): Promise<StoredAccount[]> => (await loadConfig()).accounts;
+  const rows = async (): Promise<StoredAccount[]> => displayOrder((await loadConfig()).accounts, await loadState(), sortByHeadroom);
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   const render = async (): Promise<void> => {
-    const config = await loadConfig(); const state = await loadState(); const accounts = config.accounts; const current = selected(accounts); if (current && !selectedId) selectedId = current.credentialId;
+    const config = await loadConfig(); const state = await loadState(); const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom); const current = selected(ordered); if (current && !selectedId) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40); const barWidth = width >= 120 ? 18 : 12; const lines: string[] = [];
     const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
     const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
     lines.push(`${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`); lines.push('━'.repeat(width));
     for (const provider of ['claude', 'codex'] as const) {
-      const group = accounts.filter((account) => account.provider === provider); if (!group.length) continue;
-      if (sortByHeadroom) {
-        // Mirrors AccountPool.byHeadroom so the top row is the account the pool
-        // would actually pick next: the Fable window when upstream reports one,
-        // the routing window otherwise, unmeasured last.
-        // Mirrors AccountPool.byHeadroom: least-spent first on the binding
-        // window (Claude's Fable bucket, Codex's main one), then — once they
-        // all tie at spent — whichever frees up soonest.
-        const rank = (account: StoredAccount): { usage: number | null; resetsAt: number | null } => {
-          const saved = state.accounts[account.credentialId];
-          const windows = saved?.windows || {};
-          const binding = Object.entries(windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]
-            ?? windows.primary ?? windows.requests ?? windows['7d'];
-          return { usage: binding?.usage ?? saved?.usage ?? null, resetsAt: binding?.resetsAt ?? saved?.resetsAt ?? null };
-        };
-        group.sort((a, b) => {
-          if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
-          const ra = rank(a); const rb = rank(b);
-          if (ra.usage === null || rb.usage === null) return (ra.usage === null ? 1 : 0) - (rb.usage === null ? 1 : 0);
-          if (ra.usage !== rb.usage) return ra.usage - rb.usage;
-          return (ra.resetsAt ?? Number.MAX_SAFE_INTEGER) - (rb.resetsAt ?? Number.MAX_SAFE_INTEGER);
-        });
-      }
+      const group = ordered.filter((account) => account.provider === provider); if (!group.length) continue;
       const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;
       lines.push(color(36, `┌─${sectionTitle}${'─'.repeat(Math.max(0, width - sectionTitle.length - 3))}┐`));
       // Column titles: the rows are dense and every field below is an
