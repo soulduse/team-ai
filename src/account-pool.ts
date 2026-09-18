@@ -22,6 +22,9 @@ export class AccountPool {
       const saved = state.accounts[account.credentialId];
       return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: saved?.cooldownUntil ?? null, lastUsed: saved?.lastUsed ?? null, error: saved?.error ?? null, inflight: 0 };
     });
+    // Restore the probe shape learned last run so warm-up and R work on a fresh
+    // idle proxy, instead of falling back to a hardcoded client version.
+    this.probeTemplate = state.probes?.[provider.id] ?? null;
   }
 
   // How spent an account is, on the window that actually gates it. Claude's
@@ -424,5 +427,6 @@ export class AccountPool {
 
   exportState(target: PersistedState): void {
     for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
+    if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
   }
 }

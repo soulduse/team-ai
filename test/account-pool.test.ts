@@ -216,3 +216,31 @@ test('refreshLapsed forces refresh when the expiry is unknown', async () => {
   await pool.refreshLapsed();
   assert.equal(forced, true, 'a null expiry never trips refresh()\'s own gate, so it must be forced');
 });
+
+test('probe template survives a restart via exported state', async () => {
+  const { claudeProvider } = await import('../src/providers.js');
+  const cred: OAuthCredential = { accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 60_000, accountId: 'u1' };
+  const stored: StoredAccount = { id: 'claude:u1', provider: 'claude', label: 'u1', enabled: true, priority: null, credentialId: 'claude:u1', createdAt: '' };
+  const pool = new AccountPool(claudeProvider, [stored], { 'claude:u1': cred }, { version: 1, accounts: {} });
+  assert.equal(pool.hasProbe(), false, 'no template before any traffic');
+  // Feed a genuine accepted /v1/messages so captureProbe commits a template.
+  const reqHeaders = new Headers({ 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/2.1.276 (external, cli)' });
+  const body = Buffer.from(JSON.stringify({ model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'x' }] }));
+  pool.commitProbe('/v1/messages', reqHeaders, body, new Headers());
+  assert.equal(pool.hasProbe(), true, 'template captured from live traffic');
+
+  const exported: PersistedState = { version: 1, accounts: {} };
+  pool.exportState(exported);
+  assert.ok(exported.probes?.claude, 'template is written into the snapshot');
+
+  // A fresh pool built from that snapshot must not fall back to defaultProbe.
+  const revived = new AccountPool(claudeProvider, [stored], { 'claude:u1': cred }, exported);
+  assert.equal(revived.hasProbe(), true, 'restarted proxy keeps the learned template');
+});
+
+test('exportState omits probes when none was learned', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state);
+  const exported: PersistedState = { version: 1, accounts: {} };
+  pool.exportState(exported);
+  assert.equal(exported.probes, undefined, 'nothing to persist means no probes key');
+});

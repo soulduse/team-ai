@@ -86,6 +86,11 @@ export interface PersistedState {
   version: 1;
   accounts: Record<string, AccountRuntimeState>;
   events?: Array<{ at: number; message: string }>;
+  // The warm-up probe shape learned from live traffic, per provider. Without it
+  // a restarted proxy falls back to a hardcoded client version that upstream may
+  // reject on version grounds, leaving every account unmeasured until real
+  // traffic reseeds the template.
+  probes?: Partial<Record<ProviderId, ProbeTemplate>>;
 }
 
 export interface RuntimeAccount extends StoredAccount {
