@@ -168,3 +168,16 @@ test('an unmeasured Fable window is not assumed spent', () => {
   // unknown — a known-spent account is the safer home for non-Fable traffic.
   assert.equal(pool.acquire('s', new Set(), false)?.id, 'spent');
 });
+
+test('markFableSpent records the window without benching the account', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, {
+    version: 1, accounts: { 'codex:a': { usage: 0.2, resetsAt: null, windows: { '7d': { usage: 0.2, resetsAt: null }, '7d_oi': { usage: 0.5, resetsAt: 123 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null } },
+  }, 0.98, 3, 0.8);
+  const acct = pool.accounts[0]!;
+  pool.markFableSpent(acct, 60_000);
+  assert.equal(AccountPool.fableWindow(acct)?.usage, 1);
+  assert.equal(AccountPool.fableWindow(acct)?.resetsAt, 123, 'keeps the real reset when upstream reported one');
+  assert.equal(acct.cooldownUntil, null, 'the account stays available for other models');
+  // Still selectable for non-Fable work — the whole point of not benching it.
+  assert.equal(pool.acquire('s', new Set(), false)?.id, 'a');
+});

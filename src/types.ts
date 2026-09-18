@@ -94,7 +94,10 @@ export interface RuntimeAccount extends StoredAccount {
 }
 
 export interface FailureDecision {
-  kind: 'quota' | 'auth' | 'forbidden' | 'transient' | 'fatal';
+  // 'quota' benches the whole account; 'model-quota' means only the
+  // model-weekly (Fable) budget is spent, so the account still serves every
+  // other model and is excluded from this request alone.
+  kind: 'quota' | 'model-quota' | 'auth' | 'forbidden' | 'transient' | 'fatal';
   retryAfterMs: number;
 }
 

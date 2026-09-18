@@ -98,3 +98,16 @@ test('claude routes only Fable models to the Fable budget', () => {
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.alloc(0)), true);
   assert.equal(claudeProvider.usesFableBudget!('/v1/models', body('claude-opus-5')), true);
 });
+
+test('a Fable-only 429 benches the model, not the account', () => {
+  const h = (extra: Record<string, string>) => new Headers({ 'retry-after': '480000', ...extra });
+  // Only the model-weekly window is rejected: other models still work here.
+  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-7d_oi-status': 'rejected' }), '').kind, 'model-quota');
+  // The 5h or overall weekly window is rejected: the whole account is spent.
+  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-5h-status': 'rejected' }), '').kind, 'quota');
+  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-7d-status': 'rejected' }), '').kind, 'quota');
+  // Mixed: a spent 5h window still benches the account even alongside Fable.
+  assert.equal(claudeProvider.classifyFailure(429, h({ 'anthropic-ratelimit-unified-7d_oi-status': 'rejected', 'anthropic-ratelimit-unified-5h-status': 'rejected' }), '').kind, 'quota');
+  // No window named: a plain rate limit, retried rather than benched.
+  assert.equal(claudeProvider.classifyFailure(429, h({}), '').kind, 'transient');
+});

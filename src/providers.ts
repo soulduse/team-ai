@@ -82,8 +82,19 @@ export const claudeProvider: Provider = {
     if (status === 401) return { kind: 'auth', retryAfterMs: 0 };
     if (status === 403) return { kind: 'forbidden', retryAfterMs: 30 * 60_000 };
     if (status === 429) {
-      const rejected = [...headers].some(([key, value]) => key.startsWith('anthropic-ratelimit-unified-') && key.endsWith('-status') && value === 'rejected');
-      return { kind: rejected ? 'quota' : 'transient', retryAfterMs: retryAfter(headers) };
+      const rejectedWindows = [...headers]
+        .filter(([key, value]) => key.startsWith('anthropic-ratelimit-unified-') && key.endsWith('-status') && value === 'rejected')
+        .map(([key]) => /^anthropic-ratelimit-unified-(.+)-status$/i.exec(key)?.[1] ?? '');
+      if (!rejectedWindows.length) return { kind: 'transient', retryAfterMs: retryAfter(headers) };
+      // Only the model-weekly window is spent: the account can still serve every
+      // other model, so it must not be benched until that window resets. Taking
+      // the weekly retry-after here idles an account for days over a budget that
+      // only the top model draws on — with a pool of eight that is how seven
+      // accounts sit in cooldown at 0% of their 5h window while the one that is
+      // left absorbs the whole workload and 429s.
+      const onlyFable = rejectedWindows.every((name) => /^7d_[a-z0-9]+$/i.test(name));
+      if (onlyFable) return { kind: 'model-quota', retryAfterMs: retryAfter(headers) };
+      return { kind: 'quota', retryAfterMs: retryAfter(headers) };
     }
     if (status >= 500) return { kind: 'transient', retryAfterMs: 1_000 };
     return { kind: 'fatal', retryAfterMs: 0 };

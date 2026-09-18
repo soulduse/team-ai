@@ -139,6 +139,17 @@ export class AccountPool {
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
   }
   cooldown(account: RuntimeAccount, ms: number): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); }
+
+  // Upstream refused this account for the top model only. Record the Fable
+  // window as spent rather than cooling the account down: every other model is
+  // still served from here, and the window carries its own reset so routing
+  // recovers on its own once it rolls over.
+  markFableSpent(account: RuntimeAccount, retryAfterMs: number): void {
+    const existing = AccountPool.fableWindow(account);
+    const resetsAt = existing?.resetsAt ?? (retryAfterMs > 0 ? Date.now() + retryAfterMs : null);
+    const name = Object.keys(account.windows).find((n) => /^7d_[a-z0-9]+$/i.test(n)) ?? '7d_oi';
+    account.windows = { ...account.windows, [name]: { usage: 1, resetsAt } };
+  }
   fail(account: RuntimeAccount, message: string): void { account.error = message; }
 
   async refresh(account: RuntimeAccount, force = false): Promise<void> {
@@ -325,6 +336,15 @@ export class AccountPool {
       const quota = this.provider.readQuota(response.headers, text);
       if (quota) { account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; }
       if (response.ok) { account.error = null; account.cooldownUntil = null; }
+      // A rejection that only names the model-weekly window says the account is
+      // spent for the top model, not unusable: an ordinary probe (the default
+      // model) still succeeds here. Clearing the bench on that reading is what
+      // lets R recover an account parked for days by a Fable-only 429 — the
+      // cooldown it was given was the weekly retry-after, which no other model
+      // has to wait for.
+      else if (!modelOverride && this.provider.classifyFailure(response.status, response.headers, text).kind === 'model-quota') {
+        account.error = null; account.cooldownUntil = null;
+      }
       return quota !== null;
     } catch { return false; }
   }
