@@ -8,6 +8,9 @@ import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
 import type { PersistedState, ProviderId, TeamAIConfig } from './types.js';
 
+// How long a stopping server waits for in-flight responses before cutting them.
+const DRAIN_MS = 5_000;
+
 // Ports this provider should still answer on besides the configured one:
 // whatever the user listed in proxy.legacyPorts, plus the built-in default,
 // which is the port every session started before the config was edited was
@@ -117,7 +120,19 @@ export async function runServer(): Promise<void> {
   servers.push(control);
 
   const serverPath = paths().server; await mkdir(dirname(serverPath), { recursive: true }); await writeFile(serverPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
-  const shutdown = async (): Promise<void> => { clearInterval(profileTimer); clearInterval(lapsedTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); await saving; await persistNow(); await rm(serverPath, { force: true }); process.exit(0); };
+  // close() stops listening at once but resolves only when every in-flight
+  // response has ended. One long streaming turn held that open for minutes
+  // while every other session got connection refused, because the supervisor
+  // will not start a replacement until this process exits. Give drains a
+  // moment, then cut what is left: the cut client retries, the rest reconnect
+  // to the new process seconds later.
+  const shutdown = async (): Promise<void> => {
+    clearInterval(profileTimer); clearInterval(lapsedTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+    await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
+    servers.forEach((server) => server.closeAllConnections());
+    await drained; await saving; await persistNow(); await rm(serverPath, { force: true }); process.exit(0);
+  };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
 }
 
