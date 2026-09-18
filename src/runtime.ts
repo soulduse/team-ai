@@ -84,6 +84,11 @@ export async function runServer(): Promise<void> {
 
   const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`); };
   void refreshProfiles(); const profileTimer = setInterval(() => void refreshProfiles(), 6 * 60 * 60_000); profileTimer.unref();
+  // Token keep-alive: refresh idle accounts' lapsing tokens so a chain that
+  // never rotates does not get invalidated upstream. Runs once now and every
+  // five minutes; the sweep itself is sequential to avoid a token-endpoint burst.
+  const refreshLapsed = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshLapsed()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed ${count} lapsed token(s)`); };
+  setImmediate(() => void refreshLapsed()); const lapsedTimer = setInterval(() => void refreshLapsed(), 5 * 60_000); lapsedTimer.unref();
   // Local control channel: the TUI runs in a separate process, so a fleet-wide
   // quota re-measure (R) has to reach the pools living here. Bound to the proxy
   // host and gated by the same client token as the proxies.
@@ -112,7 +117,7 @@ export async function runServer(): Promise<void> {
   servers.push(control);
 
   const serverPath = paths().server; await mkdir(dirname(serverPath), { recursive: true }); await writeFile(serverPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
-  const shutdown = async (): Promise<void> => { clearInterval(profileTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); await saving; await persistNow(); await rm(serverPath, { force: true }); process.exit(0); };
+  const shutdown = async (): Promise<void> => { clearInterval(profileTimer); clearInterval(lapsedTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); await saving; await persistNow(); await rm(serverPath, { force: true }); process.exit(0); };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
 }
 

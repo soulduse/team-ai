@@ -181,3 +181,38 @@ test('markFableSpent records the window without benching the account', () => {
   // Still selectable for non-Fable work — the whole point of not benching it.
   assert.equal(pool.acquire('s', new Set(), false)?.id, 'a');
 });
+
+test('refreshLapsed refreshes errored and expiring accounts, skips healthy ones', async () => {
+  const refreshed: string[] = [];
+  const p: Provider = { ...provider, refresh: async (c) => { refreshed.push(c.accountId!); return c; } };
+  const now = Date.now();
+  const cred = (id: string, expiresAt: number | null): OAuthCredential => ({ accessToken: 't', refreshToken: 'r', expiresAt, accountId: id });
+  const pool = new AccountPool(p, [account('err'), account('soon'), account('healthy'), account('notoken')],
+    { 'codex:err': cred('err', now + 60 * 60_000), 'codex:soon': cred('soon', now + 60_000), 'codex:healthy': cred('healthy', now + 60 * 60_000), 'codex:notoken': { accessToken: 't', refreshToken: null, expiresAt: now + 60_000, accountId: 'notoken' } }, state);
+  pool.accounts.find((a) => a.id === 'err')!.error = 'boom';
+  const count = await pool.refreshLapsed();
+  assert.equal(count, 2);
+  assert.deepEqual(refreshed.sort(), ['err', 'soon']); // healthy skipped; notoken has no refresh token
+});
+
+test('refreshLapsed runs sequentially — never two token refreshes at once', async () => {
+  let active = 0; let peak = 0;
+  const p: Provider = { ...provider, refresh: async (c) => { active++; peak = Math.max(peak, active); await new Promise((r) => setTimeout(r, 40)); active--; return c; } };
+  const cred = (id: string): OAuthCredential => ({ accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 60_000, accountId: id });
+  const ids = ['a', 'b', 'c', 'd'];
+  const pool = new AccountPool(p, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, cred(id)])), state);
+  await pool.refreshLapsed();
+  assert.equal(peak, 1, 'a burst of concurrent refreshes would rate-limit the token endpoint');
+});
+
+test('refreshLapsed forces refresh when the expiry is unknown', async () => {
+  let forced: boolean | undefined;
+  const p: Provider = { ...provider, refresh: async (c) => c };
+  const pool = new AccountPool(p, [account('x')], { 'codex:x': { accessToken: 't', refreshToken: 'r', expiresAt: null, accountId: 'x' } }, state);
+  // No error set: isolate the null-expiry path so this proves the expiry gate,
+  // not the error gate.
+  const orig = pool.refresh.bind(pool);
+  pool.refresh = (a, force) => { forced = force; return orig(a, force); };
+  await pool.refreshLapsed();
+  assert.equal(forced, true, 'a null expiry never trips refresh()\'s own gate, so it must be forced');
+});

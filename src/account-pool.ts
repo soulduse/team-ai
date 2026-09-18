@@ -8,6 +8,7 @@ export class AccountPool {
   private warmupTries = new Map<string, number>();
   readonly maxWarmupTries = 3;
   private refreshes = new Map<string, Promise<void>>();
+  private sweepInFlight = false;
 
   // Accounts still holding Fable budget are kept for Fable. An account measured
   // below this line reserves its remainder; at or above it, it is the preferred
@@ -159,6 +160,36 @@ export class AccountPool {
     const promise = this.provider.refresh(account.credential).then((next) => { account.credential = next; account.error = null; }).finally(() => this.refreshes.delete(account.id));
     this.refreshes.set(account.id, promise);
     return promise;
+  }
+
+  // Keep idle accounts' refresh-token chains rotating. Ordinary traffic sticks
+  // to a few accounts and warm-up deliberately never refreshes, so an account
+  // no one has used can sit until its access token lapses — and once the
+  // refresh token stops rotating, upstream may invalidate it and the account is
+  // lost the next time it is actually needed. This sweep refreshes any account
+  // whose token is expiring or whose last attempt errored.
+  //
+  // Sequential on purpose: after a long downtime the whole fleet can be due at
+  // once, and firing every refresh together would burst the token endpoint into
+  // a rate limit that errors accounts that were merely idle. One at a time.
+  async refreshLapsed(): Promise<number> {
+    if (this.sweepInFlight) return 0;
+    this.sweepInFlight = true;
+    try {
+      const now = Date.now();
+      const due = this.accounts.filter((a) => a.credential.refreshToken
+        && (a.error !== null || a.credential.expiresAt === null || a.credential.expiresAt < now + 5 * 60_000));
+      for (const account of due) {
+        // Force when the account errored or its expiry is unknown: refresh()'s
+        // own gate skips a token that still looks valid, but an errored account
+        // needs the attempt to heal and a null expiry never trips the gate at
+        // all. A merely-expiring token passes the gate on its own.
+        await this.refresh(account, account.error !== null || account.credential.expiresAt === null).catch(() => { /* stays errored until the token heals */ });
+      }
+      return due.length;
+    } finally {
+      this.sweepInFlight = false;
+    }
   }
 
   // A rolled-over window keeps its stale numbers until something looks, and
