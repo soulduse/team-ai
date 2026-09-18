@@ -87,14 +87,15 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} fable-quota; failover`);
         if (excluded.size < pool.accounts.length) continue;
       }
-      // A transient 429 is a request-rate spike, not exhaustion: benching the
-      // account for the full retry-after (which defaults to 60s when upstream
-      // sends no header) would idle a whole account over one burst — and a burst
-      // across the fleet then benches every account at once. Skip it for THIS
-      // request only, with a brief cooldown so a hot retry loop does not
-      // hammer the same account, and fail over.
+      // A transient 429 is a request-rate spike, not exhaustion: the account
+      // still has token quota, it is just being hit too fast. Do NOT cool it
+      // down — a request-rate/global 429 throttled onto the account would poison
+      // the fleet for unrelated requests, and a burst across the fleet would
+      // bench every account at once. Exclude it for THIS request only and fail
+      // over; when every account has been tried the 429 passes through to the
+      // client, which backs off on its own. No account state is mutated.
       if (decision.kind === 'transient') {
-        pool.cooldown(account, Math.min(decision.retryAfterMs, 5_000)); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} transient; failover`);
+        excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} transient; failover`);
         if (excluded.size < pool.accounts.length) continue;
       }
       if (decision.kind === 'quota' || decision.kind === 'forbidden') {

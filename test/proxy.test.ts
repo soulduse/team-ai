@@ -106,9 +106,10 @@ test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy
   } finally { proxy.close(); }
 });
 
-test('a transient 429 cools the account only briefly, not for the full retry-after', async () => {
+test('a transient 429 fails over without cooling down the account', async () => {
   // Upstream returns a transient 429 (no rejected quota window) with a long
-  // retry-after. The account must not be benched for that whole duration.
+  // retry-after. The account must NOT be benched at all — a request-rate 429
+  // throttled onto the account would poison the fleet for unrelated requests.
   let hits = 0;
   const upstream = createServer(async (req, res) => {
     req.resume(); await new Promise<void>((r) => req.once('end', r));
@@ -134,9 +135,9 @@ test('a transient 429 cools the account only briefly, not for the full retry-aft
   try {
     const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
     assert.equal(res.status, 200, 'the transient 429 fails over to the second account'); await res.text();
-    // Account 'a' got a transient 429 — its cooldown must be brief (<=5s), not 60s.
+    // Account 'a' got a transient 429 — it must be left immediately usable.
     const a = pool.accounts.find((x) => x.id === 'a')!;
-    const remaining = (a.cooldownUntil ?? 0) - Date.now();
-    assert.ok(remaining <= 5_000, `transient cooldown should be brief, was ${remaining}ms`);
+    assert.equal(a.cooldownUntil, null, 'a transient 429 must not cool the account down');
+    assert.equal(pool.acquire('next', new Set(), false)?.id, 'a', 'account a stays selectable right after a transient 429');
   } finally { proxy.close(); upstream.close(); }
 });
