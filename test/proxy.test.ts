@@ -102,7 +102,45 @@ test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy
     const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
     assert.equal(res.status, 429);
     assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
-    await res.text();
+    const body = JSON.parse(await res.text()) as { error: string };
+    assert.match(body.error, /1 over the 98% session limit/);
+  } finally { proxy.close(); }
+});
+
+test('acquire-null 429 for a Fable request names the spent Fable budgets, the earliest reset and that other models still work', async () => {
+  const provider: Provider = {
+    id: 'claude', label: 'Claude', upstreamBase: 'http://127.0.0.1:1',
+    normalizePath: () => '/v1/messages', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }),
+    usesFableBudget: (_path, body) => /fable/i.test(body.toString()),
+  };
+  const stored = (id: string): StoredAccount => ({ id, provider: 'claude', label: `${id}@example.com`, enabled: true, priority: null, credentialId: id, createdAt: '' });
+  const credential = (id: string): OAuthCredential => ({ accessToken: 's', refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [stored('a'), stored('b')], { a: credential('a'), b: credential('b') }, { version: 1, accounts: {} });
+  const events: string[] = [];
+  const now = Date.now();
+  // a: Fable weekly spent, rolls over in ~3 days. b: still has Fable but its
+  // session window is at the switch threshold and resets in ~9 minutes.
+  pool.accounts[0]!.windows = { '7d_oi': { usage: 1, resetsAt: now + 3 * 24 * 3_600_000 }, '5h': { usage: 0.1, resetsAt: now + 3_600_000 } };
+  pool.accounts[1]!.windows = { '7d_oi': { usage: 0.6, resetsAt: now + 6 * 24 * 3_600_000 }, '5h': { usage: 0.98, resetsAt: now + 9 * 60_000 } };
+  pool.accounts[1]!.usage = 0.98; pool.accounts[1]!.resetsAt = now + 9 * 60_000;
+  const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  const call = (model: string) => fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: JSON.stringify({ model }) });
+  try {
+    const res = await call('claude-fable-5-1');
+    assert.equal(res.status, 429);
+    assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
+    assert.equal(res.headers.get('retry-after'), '540');
+    const body = JSON.parse(await res.text()) as { error: string };
+    assert.match(body.error, /^No Claude account can serve Fable right now \(2 accounts: 1 spent the Fable weekly budget, 1 over the 98% session limit\)\./);
+    assert.match(body.error, /Earliest reset in 9m: b@example\.com session\./);
+    assert.match(body.error, /Other models are still served/);
+    assert.ok(events.some((e) => /429 quota_exhausted \(fable\), next reset 9m/.test(e)), `activity log should record the 429: ${events.join(' | ')}`);
+    // A non-Fable request is still routed to account a: it reaches the (unreachable)
+    // upstream and fails over instead of being refused before dispatch.
+    const opus = await call('claude-opus-5'); await opus.text();
+    assert.ok(events.some((e) => /→ a@example\.com network error; failover/.test(e)), `non-Fable request should have tried account a: ${events.join(' | ')}`);
   } finally { proxy.close(); }
 });
 

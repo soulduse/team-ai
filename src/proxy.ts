@@ -48,11 +48,16 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   while (!res.destroyed) {
     const account = pool.acquire(session, excluded, wantsFable);
     if (!account) {
-      // Distinguish "every account is busy right now" (retry) from "no account
-      // has budget left" (wait for a reset) so the caller — and the logs — know
-      // which one they hit.
-      const reason = pool.saturatedButHealthy(excluded) ? 'concurrency_saturated' : 'quota_exhausted';
-      return json(res, 429, { error: `No ${pool.provider.label} account is currently available` }, { 'x-teamai-429-reason': reason });
+      // Say what is actually short — a free slot (retry in a moment) or budget
+      // (and whose, and until when) — and leave a trace in the activity log:
+      // this 429 never reached upstream, so nothing else records it.
+      const shortfall = pool.explainShortfall(excluded, wantsFable);
+      onChange(`${pool.provider.label} ${req.method} ${path} → 429 ${shortfall.reason}${wantsFable ? ' (fable)' : ''}${shortfall.retryAfterMs ? `, next reset ${AccountPool.formatDuration(shortfall.retryAfterMs)}` : ''}`);
+      const headers: Record<string, string> = { 'x-teamai-429-reason': shortfall.reason };
+      // Claude Code honours retry-after; cap it so a days-away weekly reset
+      // does not park a session for days when a session window may roll first.
+      if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));
+      return json(res, 429, { error: shortfall.message }, headers);
     }
     let response: Response;
     try {

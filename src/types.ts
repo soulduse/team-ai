@@ -132,3 +132,12 @@ export interface Provider {
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };
   fetchProfile?(credential: OAuthCredential): Promise<SubscriptionProfile>;
 }
+
+// Why the pool could not hand out an account, shaped for the 429 the client
+// is about to receive. retryAfterMs is the earliest known roll-over, or null
+// when nothing on record will free up on its own.
+export interface Shortfall {
+  reason: 'concurrency_saturated' | 'quota_exhausted';
+  message: string;
+  retryAfterMs: number | null;
+}

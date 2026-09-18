@@ -1,4 +1,4 @@
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, RuntimeAccount, StoredAccount } from './types.js';
+import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
 export class AccountPool {
   readonly accounts: RuntimeAccount[];
@@ -151,6 +151,47 @@ export class AccountPool {
   // the fleet is out of quota.
   saturatedButHealthy(excluded: Set<string> = new Set()): boolean {
     return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded) && this.atConcurrencyCap(a));
+  }
+
+  // Why acquire() just came back empty, worded for the client that is about
+  // to see a 429. The bare "no account available" hid everything the caller
+  // needs to decide what to do: whether it is a slot shortage (retry in a
+  // moment) or a budget shortage, whether only the Fable weekly budget is gone
+  // (other models still work), and the earliest moment anything rolls over.
+  explainShortfall(excluded: Set<string>, wantsFable: boolean): Shortfall {
+    const label = this.provider.label;
+    if (this.saturatedButHealthy(excluded)) {
+      return { reason: 'concurrency_saturated', retryAfterMs: 5_000, message: `Every ${label} account with budget left is at its concurrency cap (${this.maxConcurrent} requests in flight each). Retry in a few seconds.` };
+    }
+    const now = Date.now();
+    const live = this.accounts.filter((a) => a.enabled && !a.error && !excluded.has(a.id));
+    const resets: Array<{ at: number; label: string }> = [];
+    let fableSpent = 0; let overLimit = 0; let coolingDown = 0;
+    for (const account of live) {
+      const fable = AccountPool.fableWindow(account);
+      if (wantsFable && AccountPool.fableSpent(account, 1)) { fableSpent++; if (fable?.resetsAt) resets.push({ at: fable.resetsAt, label: `${account.label} Fable weekly` }); continue; }
+      if (account.usage !== null && account.usage >= this.threshold) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} session` }); continue; }
+      if (account.cooldownUntil && account.cooldownUntil > now) { coolingDown++; resets.push({ at: account.cooldownUntil, label: `${account.label} cooldown` }); }
+    }
+    const next = resets.filter((r) => r.at > now).sort((a, b) => a.at - b.at)[0];
+    const parts: string[] = [];
+    if (fableSpent) parts.push(`${fableSpent} spent the Fable weekly budget`);
+    if (overLimit) parts.push(`${overLimit} over the ${Math.round(this.threshold * 100)}% session limit`);
+    if (coolingDown) parts.push(`${coolingDown} cooling down after an upstream rejection`);
+    const what = wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
+    const detail = parts.length ? ` (${live.length} accounts: ${parts.join(', ')})` : ` (${live.length} accounts)`;
+    const when = next ? ` Earliest reset in ${AccountPool.formatDuration(next.at - now)}: ${next.label}.` : '';
+    const hint = wantsFable && fableSpent ? ' Other models are still served: switch model or wait.' : '';
+    return { reason: 'quota_exhausted', retryAfterMs: next ? next.at - now : null, message: `${what}${detail}.${when}${hint}` };
+  }
+
+  static formatDuration(ms: number): string {
+    const minutes = Math.max(1, Math.ceil(ms / 60_000));
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h${minutes % 60 ? `${minutes % 60}m` : ''}`;
+    const days = Math.floor(hours / 24);
+    return `${days}d${hours % 24 ? `${hours % 24}h` : ''}`;
   }
 
   // The useful concurrent load this pool can carry: a live account contributes
