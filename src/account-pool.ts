@@ -16,6 +16,30 @@ export class AccountPool {
     });
   }
 
+  // How spent an account is, on the window that actually gates it. Claude's
+  // model-weekly (Fable) bucket is the binding one in practice — an account can
+  // sit at 50% overall and still refuse the top model at 100% — so it wins when
+  // present, falling back to whatever routing window was measured.
+  static headroomUsage(account: { usage: number | null; windows: Record<string, { usage: number | null }> }): number | null {
+    const fable = Object.entries(account.windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1];
+    return fable?.usage ?? account.usage;
+  }
+
+  // Least-spent first, so both selection and the dashboard agree on what "next"
+  // means. Unmeasured accounts sort last rather than first: a null is unknown,
+  // not empty, and routing to one on a hunch spends an unknown budget.
+  static byHeadroom(a: RuntimeAccount, b: RuntimeAccount): number {
+    const ua = AccountPool.headroomUsage(a); const ub = AccountPool.headroomUsage(b);
+    if (ua === null || ub === null) return (ua === null ? 1 : 0) - (ub === null ? 1 : 0);
+    if (ua !== ub) return ua - ub;
+    // A spent Fable window ties every account at 100% while their overall
+    // budgets still differ widely, so fall through to the routing window —
+    // otherwise the order says nothing once the top model runs out.
+    const oa = a.usage ?? 1; const ob = b.usage ?? 1;
+    if (oa !== ob) return oa - ob;
+    return (a.resetsAt ?? Number.MAX_SAFE_INTEGER) - (b.resetsAt ?? Number.MAX_SAFE_INTEGER);
+  }
+
   private available(account: RuntimeAccount, excluded: Set<string>): boolean {
     const now = Date.now();
     if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; }
@@ -27,8 +51,7 @@ export class AccountPool {
     if (pinned && this.available(pinned, excluded)) { pinned.inflight++; return pinned; }
     const candidates = this.accounts.filter((a) => this.available(a, excluded)).sort((a, b) => {
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
-      if (a.resetsAt !== b.resetsAt) return (a.resetsAt ?? Number.MAX_SAFE_INTEGER) - (b.resetsAt ?? Number.MAX_SAFE_INTEGER);
-      return (a.usage ?? 0) - (b.usage ?? 0);
+      return AccountPool.byHeadroom(a, b);
     });
     const selected = candidates[0] || null;
     if (selected) { selected.inflight++; this.affinity.set(session, selected.id); }

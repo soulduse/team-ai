@@ -74,6 +74,10 @@ function windowLabel(minutes: number | null | undefined, fallback: string): stri
 export async function runTui(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
   let selectedId: string | null = null; let mode: 'normal' | 'order' | 'delete' | 'add' = 'normal'; let message = ''; let busy = false; let closed = false;
+  // Least-spent first by default: the dashboard is mostly read to answer "which
+  // account has room left", and that ordering answers it at a glance. 'c' puts
+  // it back in configured order for anyone reading it as a roster.
+  let sortByHeadroom = true;
   const rows = async (): Promise<StoredAccount[]> => (await loadConfig()).accounts;
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
@@ -85,6 +89,23 @@ export async function runTui(): Promise<void> {
     lines.push(`${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`); lines.push('━'.repeat(width));
     for (const provider of ['claude', 'codex'] as const) {
       const group = accounts.filter((account) => account.provider === provider); if (!group.length) continue;
+      if (sortByHeadroom) {
+        // Mirrors AccountPool.byHeadroom so the top row is the account the pool
+        // would actually pick next: the Fable window when upstream reports one,
+        // the routing window otherwise, unmeasured last.
+        const spent = (account: StoredAccount): { primary: number | null; overall: number } => {
+          const saved = state.accounts[account.credentialId];
+          const fable = Object.entries(saved?.windows || {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1];
+          return { primary: fable?.usage ?? saved?.usage ?? null, overall: saved?.usage ?? 1 };
+        };
+        group.sort((a, b) => {
+          if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+          const sa = spent(a); const sb = spent(b);
+          if (sa.primary === null || sb.primary === null) return (sa.primary === null ? 1 : 0) - (sb.primary === null ? 1 : 0);
+          if (sa.primary !== sb.primary) return sa.primary - sb.primary;
+          return sa.overall - sb.overall;
+        });
+      }
       const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;
       lines.push(color(36, `┌─${sectionTitle}${'─'.repeat(Math.max(0, width - sectionTitle.length - 3))}┐`));
       // Column titles: the rows are dense and every field below is an
@@ -129,7 +150,7 @@ export async function runTui(): Promise<void> {
     const activityRows = Math.max(4, height - lines.length - 5); lines.push(''); lines.push(` Activity ${'─'.repeat(Math.max(0, width - 10))}`);
     for (const event of [...(state.events || [])].reverse().slice(0, activityRows)) lines.push(`${color(90, new Date(event.at).toLocaleTimeString('en-GB'))} ${event.message}`);
     while (lines.length < height - 2) lines.push(''); lines.push('─'.repeat(width));
-    const footer = mode === 'normal' ? ' 1 Claude   2 Codex   ↑↓ select   s switch   e enable   o order   d delete   a add   R Reload   q quit' : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
+    const footer = mode === 'normal' ? ` 1 Claude   2 Codex   ↑↓ select   s switch   e enable   o order   d delete   a add   R Reload   c ${sortByHeadroom ? 'quota' : 'config'}-sort   q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
     lines.push(fit(`${footer}${message ? `   ${message}` : ''}`, width)); process.stdout.write(`${ESC}H${lines.slice(0, height).map((line) => fit(line, width)).join('\n')}`);
   };
 
@@ -179,6 +200,7 @@ export async function runTui(): Promise<void> {
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
       else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
       else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); }
+      else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();
   }));
