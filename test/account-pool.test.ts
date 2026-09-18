@@ -97,3 +97,74 @@ test('an unmeasured account sorts last, not first', () => {
   });
   assert.equal(pool.acquire('s1')?.id, 'known');
 });
+
+// The pool ranks Fable requests on the Fable window and everything else on the
+// general one. Without the split, an Opus turn lands on whichever account has
+// the most Fable left — the one account that still needs protecting.
+const fableFleet = () => {
+  const ids = ['spare', 'reserved'];
+  const stored = ids.map((id) => account(id));
+  const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
+  const win = (general: number, fable: number) => ({
+    usage: general, resetsAt: null,
+    windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } },
+    profile: null, cooldownUntil: null, lastUsed: null, error: null,
+  });
+  // 'reserved' looks best on the Fable window and worst on the general one.
+  return new AccountPool(provider, stored, credentials, {
+    version: 1, accounts: { 'codex:spare': win(0.55, 1), 'codex:reserved': win(0.05, 0.04) },
+  }, 0.98, 3, 0.8);
+};
+
+test('non-Fable traffic prefers an account whose Fable budget is spent', () => {
+  assert.equal(fableFleet().acquire('s', new Set(), false)?.id, 'spare');
+});
+
+test('Fable traffic still goes to the account with Fable left', () => {
+  assert.equal(fableFleet().acquire('s', new Set(), true)?.id, 'reserved');
+});
+
+test('session affinity does not drag non-Fable turns onto a reserved account', () => {
+  const pool = fableFleet();
+  const first = pool.acquire('shared', new Set(), true); assert.equal(first?.id, 'reserved'); pool.release(first!);
+  // Same session, different model: the pin must not win here.
+  assert.equal(pool.acquire('shared', new Set(), false)?.id, 'spare');
+});
+
+test('non-Fable falls back to a reserved account when spent ones are unavailable', () => {
+  const pool = fableFleet();
+  pool.accounts.find((a) => a.id === 'spare')!.cooldownUntil = Date.now() + 60_000;
+  assert.equal(pool.acquire('s', new Set(), false)?.id, 'reserved');
+});
+
+test('a threshold of 1 disables the split', () => {
+  const ids = ['spare', 'reserved'];
+  const stored = ids.map((id) => account(id));
+  const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
+  const win = (general: number, fable: number) => ({
+    usage: general, resetsAt: null,
+    windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } },
+    profile: null, cooldownUntil: null, lastUsed: null, error: null,
+  });
+  const pool = new AccountPool(provider, stored, credentials, {
+    version: 1, accounts: { 'codex:spare': win(0.55, 1), 'codex:reserved': win(0.05, 0.04) },
+  }, 0.98, 3, 1);
+  // With the reserve off, a spent Fable window is no longer a tier, so ranking
+  // falls back to least-spent on the general window.
+  assert.equal(pool.acquire('s', new Set(), false)?.id, 'reserved');
+});
+
+test('an unmeasured Fable window is not assumed spent', () => {
+  const ids = ['unmeasured', 'spent'];
+  const stored = ids.map((id) => account(id));
+  const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
+  const pool = new AccountPool(provider, stored, credentials, {
+    version: 1, accounts: {
+      'codex:unmeasured': { usage: 0.1, resetsAt: null, windows: { '7d': { usage: 0.1, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
+      'codex:spent': { usage: 0.6, resetsAt: null, windows: { '7d': { usage: 0.6, resetsAt: null }, '7d_oi': { usage: 1, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
+    },
+  }, 0.98, 3, 0.8);
+  // 'unmeasured' is cheaper on the general window, but its Fable budget is
+  // unknown — a known-spent account is the safer home for non-Fable traffic.
+  assert.equal(pool.acquire('s', new Set(), false)?.id, 'spent');
+});

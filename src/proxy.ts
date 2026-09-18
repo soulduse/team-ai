@@ -31,8 +31,11 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
 
 async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void): Promise<void> {
   const excluded = new Set<string>(); let authRetried = false;
+  // Decided once from the request body: the retry loop must not re-read a body
+  // it has already forwarded, and the answer cannot change between failovers.
+  const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? true;
   while (!res.destroyed) {
-    const account = pool.acquire(session, excluded);
+    const account = pool.acquire(session, excluded, wantsFable);
     if (!account) return json(res, 429, { error: `No ${pool.provider.label} account is currently available` });
     let response: Response;
     try {

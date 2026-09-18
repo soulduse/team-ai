@@ -93,6 +93,22 @@ export const claudeProvider: Provider = {
     const data = await tokenRefresh('https://platform.claude.com/v1/oauth/token', 'application/json', JSON.stringify({ grant_type: 'refresh_token', refresh_token: credential.refreshToken, client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e' }));
     return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
   },
+  // Only the top model draws on the model-weekly window, so only those requests
+  // should be ranked by it. Anything else — Opus, Sonnet, Haiku — is routed to
+  // accounts whose Fable budget is already gone, leaving the remaining Fable
+  // headroom for the requests that cannot be served any other way.
+  //
+  // An unreadable or model-less body counts as Fable: the conservative reading
+  // keeps an unknown request on the existing behaviour rather than silently
+  // spending an account that was being reserved.
+  usesFableBudget(path, body) {
+    if (!path.endsWith('/messages') || body.length === 0) return true;
+    try {
+      const parsed = JSON.parse(body.toString('utf8')) as { model?: unknown };
+      if (typeof parsed.model !== 'string') return true;
+      return /fable/i.test(parsed.model);
+    } catch { return true; }
+  },
   defaultProbe() {
     // The shape Claude Code itself sends. Subscription (OAuth) credentials are
     // rejected for anything that doesn't look like the official client, so this

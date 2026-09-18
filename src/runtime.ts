@@ -10,7 +10,7 @@ import type { PersistedState } from './types.js';
 
 export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
-  const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount));
+  const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200);
   const persistNow = async (): Promise<void> => { const next: PersistedState = { version: 1, accounts: {}, events }; pools.forEach((p) => p.exportState(next)); const updated = await loadCredentials(); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };

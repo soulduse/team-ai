@@ -83,3 +83,18 @@ test('probe capture ignores unrelated paths and unparsable bodies', () => {
   assert.equal(claudeProvider.captureProbe!('/v1/messages', new Headers(), Buffer.from('not json'), false), null);
   assert.equal(codexProvider.captureProbe!('/models', new Headers(), Buffer.from('{}'), false), null);
 });
+
+test('claude routes only Fable models to the Fable budget', () => {
+  const body = (model: unknown) => Buffer.from(JSON.stringify({ model, messages: [] }));
+  const uses = (model: unknown) => claudeProvider.usesFableBudget!('/v1/messages', body(model));
+  assert.equal(uses('claude-fable-5-1'), true);
+  assert.equal(uses('claude-opus-5'), false);
+  assert.equal(uses('claude-sonnet-5'), false);
+  assert.equal(uses('claude-haiku-4-5-20251001'), false);
+  // Unknown shapes stay on the conservative path rather than spending a
+  // reserved account by accident.
+  assert.equal(uses(undefined), true);
+  assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.from('not json')), true);
+  assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.alloc(0)), true);
+  assert.equal(claudeProvider.usesFableBudget!('/v1/models', body('claude-opus-5')), true);
+});

@@ -23,6 +23,12 @@ export interface TeamAIConfig {
   switchThreshold: number;
   warmupIntervalMs?: number;
   maxConcurrentPerAccount: number;
+  // At or above this share of the model-weekly (Fable) window, an account counts
+  // as spent for that model and becomes the preferred home for traffic that does
+  // not need it. Below it, the account is held back so its remaining Fable budget
+  // is not consumed by Opus/Sonnet requests that any account could serve.
+  // 1 disables the split and restores plain least-spent routing.
+  fableReserveThreshold?: number;
   accounts: StoredAccount[];
 }
 
@@ -103,6 +109,9 @@ export interface Provider {
   classifyFailure(status: number, headers: Headers, body: string): FailureDecision;
   refresh(credential: OAuthCredential): Promise<OAuthCredential>;
   fableModel?: string;
+  // Whether a request spends the model-weekly (Fable) budget. Providers without
+  // such a split leave this undefined and every request ranks the same way.
+  usesFableBudget?(path: string, body: Buffer): boolean;
   defaultProbe?(): ProbeTemplate | null;
   captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };

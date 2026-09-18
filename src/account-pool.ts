@@ -9,7 +9,14 @@ export class AccountPool {
   readonly maxWarmupTries = 3;
   private refreshes = new Map<string, Promise<void>>();
 
-  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 3) {
+  // Accounts still holding Fable budget are kept for Fable. An account measured
+  // below this line reserves its remainder; at or above it, it is the preferred
+  // home for everything else. 1 disables the split.
+  private reservesFable(account: RuntimeAccount): boolean {
+    return this.fableReserve < 1 && !AccountPool.fableSpent(account, this.fableReserve) && AccountPool.fableWindow(account)?.usage != null;
+  }
+
+  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 3, readonly fableReserve = 0.8) {
     this.accounts = stored.filter((a) => a.provider === provider.id && credentials[a.credentialId]).map((account) => {
       const saved = state.accounts[account.credentialId];
       return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: saved?.cooldownUntil ?? null, lastUsed: saved?.lastUsed ?? null, error: saved?.error ?? null, inflight: 0 };
@@ -28,8 +35,18 @@ export class AccountPool {
   // model-weekly (Fable) bucket, or the provider's main window otherwise. Both
   // ranking and the dashboard read the same one so they cannot disagree.
   static bindingWindow(account: { windows: Record<string, { usage: number | null; resetsAt?: number | null }> }): { usage: number | null; resetsAt?: number | null } | undefined {
-    const fable = Object.entries(account.windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1];
-    return fable ?? account.windows.primary ?? account.windows.requests ?? account.windows['7d'];
+    return AccountPool.fableWindow(account) ?? AccountPool.generalWindow(account);
+  }
+
+  // The model-weekly bucket on its own: the budget only the top model spends.
+  static fableWindow(account: { windows: Record<string, { usage: number | null; resetsAt?: number | null }> }): { usage: number | null; resetsAt?: number | null } | undefined {
+    return Object.entries(account.windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1];
+  }
+
+  // The bucket every request spends, Fable or not. This is what gates traffic
+  // that does not need the top model, so it is what ranks those requests.
+  static generalWindow(account: { windows: Record<string, { usage: number | null; resetsAt?: number | null }> }): { usage: number | null; resetsAt?: number | null } | undefined {
+    return account.windows.primary ?? account.windows.requests ?? account.windows['7d'];
   }
 
   // Least-spent first, so both selection and the dashboard agree on what "next"
@@ -49,18 +66,63 @@ export class AccountPool {
     return (a.usage ?? 1) - (b.usage ?? 1);
   }
 
+  // Ranking for traffic that does not need the top model. Accounts whose Fable
+  // budget is already spent come first, so an Opus or Sonnet request lands on a
+  // week that has nothing left to protect instead of eating the one account that
+  // can still serve Fable. Within a tier it is least-spent on the general window,
+  // which is the budget such a request actually consumes.
+  //
+  // Without this split, byHeadroom ranks every request on the Fable window, and
+  // the account with the most Fable left is exactly the one Opus and Sonnet get
+  // routed to first — the opposite of what the pool should do.
+  static byNonFableHeadroom(reserve: number): (a: RuntimeAccount, b: RuntimeAccount) => number {
+    return (a, b) => {
+      // A reserve of 1 holds nothing back, so there is no tier to sort by — rank
+      // purely on the budget the request spends.
+      const ta = reserve < 1 && AccountPool.fableSpent(a, reserve);
+      const tb = reserve < 1 && AccountPool.fableSpent(b, reserve);
+      if (ta !== tb) return ta ? -1 : 1;
+      const ua = AccountPool.generalUsage(a); const ub = AccountPool.generalUsage(b);
+      if (ua === null || ub === null) return (ua === null ? 1 : 0) - (ub === null ? 1 : 0);
+      if (ua !== ub) return ua - ub;
+      return AccountPool.byHeadroom(a, b);
+    };
+  }
+
+  // Spent for Fable purposes: at or past the reserve line, so nothing is held
+  // back by sending other models here. An unmeasured Fable window is not treated
+  // as spent — a null is unknown, and assuming empty would spend a budget we
+  // have not looked at.
+  static fableSpent(account: RuntimeAccount, reserve: number): boolean {
+    const usage = AccountPool.fableWindow(account)?.usage;
+    return usage !== null && usage !== undefined && usage >= reserve;
+  }
+
+  static generalUsage(account: RuntimeAccount): number | null {
+    return AccountPool.generalWindow(account)?.usage ?? account.usage;
+  }
+
   private available(account: RuntimeAccount, excluded: Set<string>): boolean {
     const now = Date.now();
     if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; }
     return account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < this.threshold) && account.inflight < this.maxConcurrent;
   }
 
-  acquire(session: string, excluded = new Set<string>()): RuntimeAccount | null {
+  // `wantsFable` says whether this request needs the model-weekly budget. It is
+  // read from the request body upstream, so a mixed workload (Claude Code on
+  // Opus, another session on Fable) splits across the pool by what each request
+  // actually spends rather than all chasing the same window.
+  acquire(session: string, excluded = new Set<string>(), wantsFable = true): RuntimeAccount | null {
     const pinned = this.accounts.find((a) => a.id === this.affinity.get(session));
-    if (pinned && this.available(pinned, excluded)) { pinned.inflight++; return pinned; }
+    // Session affinity is a cache-locality preference, not a claim on the
+    // account. Honour it only while it agrees with what this request should
+    // spend: a session that once asked for Fable must not keep dragging its
+    // Opus turns onto the one account still holding Fable budget.
+    if (pinned && this.available(pinned, excluded) && (wantsFable || !this.reservesFable(pinned))) { pinned.inflight++; return pinned; }
+    const rank = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
     const candidates = this.accounts.filter((a) => this.available(a, excluded)).sort((a, b) => {
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
-      return AccountPool.byHeadroom(a, b);
+      return rank(a, b);
     });
     const selected = candidates[0] || null;
     if (selected) { selected.inflight++; this.affinity.set(session, selected.id); }
