@@ -87,7 +87,17 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} fable-quota; failover`);
         if (excluded.size < pool.accounts.length) continue;
       }
-      if (decision.kind === 'quota' || decision.kind === 'forbidden' || decision.kind === 'transient') {
+      // A transient 429 is a request-rate spike, not exhaustion: benching the
+      // account for the full retry-after (which defaults to 60s when upstream
+      // sends no header) would idle a whole account over one burst — and a burst
+      // across the fleet then benches every account at once. Skip it for THIS
+      // request only, with a brief cooldown so a hot retry loop does not
+      // hammer the same account, and fail over.
+      if (decision.kind === 'transient') {
+        pool.cooldown(account, Math.min(decision.retryAfterMs, 5_000)); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} transient; failover`);
+        if (excluded.size < pool.accounts.length) continue;
+      }
+      if (decision.kind === 'quota' || decision.kind === 'forbidden') {
         pool.cooldown(account, decision.retryAfterMs); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}; failover`);
         if (excluded.size < pool.accounts.length) continue;
       }

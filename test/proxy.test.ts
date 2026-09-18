@@ -105,3 +105,38 @@ test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy
     await res.text();
   } finally { proxy.close(); }
 });
+
+test('a transient 429 cools the account only briefly, not for the full retry-after', async () => {
+  // Upstream returns a transient 429 (no rejected quota window) with a long
+  // retry-after. The account must not be benched for that whole duration.
+  let hits = 0;
+  const upstream = createServer(async (req, res) => {
+    req.resume(); await new Promise<void>((r) => req.once('end', r));
+    hits++;
+    // First account: transient 429 with a 60s retry-after. Second: success.
+    if (hits === 1) { res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '60' }); res.end('{"error":"slow down"}'); }
+    else { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n'); }
+  });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: `http://127.0.0.1:${up.port}`,
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (incoming, account) => { const h = new Headers(incoming); h.set('authorization', `Bearer ${account.credential.accessToken}`); return h; },
+    // A 429 with no rejected quota window classifies as transient.
+    classifyFailure: (status) => status === 429 ? { kind: 'transient', retryAfterMs: 60_000 } : { kind: 'fatal', retryAfterMs: 0 },
+  };
+  const st = (id: string, priority: number): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority, credentialId: id, createdAt: '' });
+  const cred = (id: string): OAuthCredential => ({ accessToken: `s-${id}`, refreshToken: null, expiresAt: null, accountId: id });
+  const state: PersistedState = { version: 1, accounts: {} };
+  const pool = new AccountPool(provider, [st('a', 1), st('b', 2)], { a: cred('a'), b: cred('b') }, state);
+  const proxy = createProxy(pool, 'local-secret', () => {});
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(res.status, 200, 'the transient 429 fails over to the second account'); await res.text();
+    // Account 'a' got a transient 429 — its cooldown must be brief (<=5s), not 60s.
+    const a = pool.accounts.find((x) => x.id === 'a')!;
+    const remaining = (a.cooldownUntil ?? 0) - Date.now();
+    assert.ok(remaining <= 5_000, `transient cooldown should be brief, was ${remaining}ms`);
+  } finally { proxy.close(); upstream.close(); }
+});
