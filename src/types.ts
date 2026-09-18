@@ -19,7 +19,14 @@ export interface OAuthCredential {
 
 export interface TeamAIConfig {
   version: 1;
-  proxy: { host: string; claudePort: number; codexPort: number; controlPort?: number; clientToken: string };
+  proxy: {
+    host: string; claudePort: number; codexPort: number; controlPort?: number; clientToken: string;
+    // Extra ports to keep answering on, per provider. Clients receive their base
+    // URL at startup and cannot be redirected afterwards, so a port change would
+    // otherwise strand every open session; listing the old port here keeps those
+    // sessions alive. The built-in default port is always included.
+    legacyPorts?: Partial<Record<ProviderId, number[]>>;
+  };
   switchThreshold: number;
   warmupIntervalMs?: number;
   maxConcurrentPerAccount: number;

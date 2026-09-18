@@ -5,8 +5,20 @@ import { AccountPool } from './account-pool.js';
 import { createProxy, secureEqual } from './proxy.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
-import { loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
-import type { PersistedState } from './types.js';
+import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
+import type { PersistedState, ProviderId, TeamAIConfig } from './types.js';
+
+// Ports this provider should still answer on besides the configured one:
+// whatever the user listed in proxy.legacyPorts, plus the built-in default,
+// which is the port every session started before the config was edited was
+// handed. Deduplicated, and never the live port itself.
+export function legacyPorts(config: TeamAIConfig, id: ProviderId): number[] {
+  const current = id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
+  const fallback = defaultConfig().proxy;
+  const declared = config.proxy.legacyPorts?.[id] ?? [];
+  const builtIn = id === 'claude' ? fallback.claudePort : fallback.codexPort;
+  return [...new Set([...declared, builtIn])].filter((p) => Number.isInteger(p) && p > 0 && p !== current);
+}
 
 export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
@@ -21,7 +33,37 @@ export async function runServer(): Promise<void> {
     const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
     const server = createProxy(pool, config.proxy.clientToken, persist); servers.push(server);
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
+    // Past startup, a socket-level error must never end the process: the relay
+    // is the only route its clients have, and killing it over one bad socket
+    // strands every open session with connection refused.
+    server.on('error', (error) => console.log(`[TeamAI] ${pool.provider.label} proxy error: ${error.message}`));
     console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${port}`);
+
+    // Also answer on ports this provider used before. A client is handed its
+    // base URL through the environment when it starts (cli.ts), and a running
+    // process cannot be told about a new one — so changing a port in config
+    // strands every session already open, permanently, with connection refused.
+    // Keeping the old port alive is what makes a port change survivable.
+    // Failures here are not fatal: a port taken by something else just means
+    // that one legacy address is unavailable, not that the proxy cannot serve.
+    for (const legacy of legacyPorts(config, pool.provider.id)) {
+      const alias = createProxy(pool, config.proxy.clientToken, persist);
+      try {
+        await new Promise<void>((resolve, reject) => { alias.once('error', reject); alias.listen(legacy, config.proxy.host, () => { alias.removeListener('error', reject); resolve(); }); });
+        servers.push(alias);
+        console.log(`[TeamAI] ${pool.provider.label} proxy (legacy): http://${config.proxy.host}:${legacy}`);
+      } catch (error) {
+        // The port is taken (often by an older instance of this very proxy).
+        // Close the half-built server rather than leaving it attached: an
+        // abandoned one keeps an 'error' listener on a live handle, and the
+        // next error it emits is unhandled — which takes down the process that
+        // is still serving the main port, and looks to clients exactly like the
+        // connection refused this feature exists to prevent.
+        alias.close();
+        alias.removeAllListeners();
+        console.log(`[TeamAI] ${pool.provider.label} legacy port ${legacy} unavailable: ${(error as Error).message}`);
+      }
+    }
   }
   // Periodic warm-up: fill in accounts the dashboard shows as unmeasured —
   // including ones whose window just rolled over — without waiting for the user
