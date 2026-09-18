@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
+import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, displayOrder, ESC, type FrameMode } from './frame.js';
 import { runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
@@ -46,11 +47,15 @@ export async function runTui(): Promise<void> {
   };
   // Snapshot what is on screen — same width, cursor and sort — with account
   // addresses masked, so the result can be pasted somewhere public as is.
+  // Then hand it over: reveal it in the file manager and put the image on the
+  // clipboard, saying which of those actually happened.
   const capture = async (): Promise<void> => {
     busy = true;
     try {
       const result = await captureDashboard({ level: 'partial', width: Math.max(80, process.stdout.columns || 120), selectedId, mode, sortByHeadroom });
-      message = `Captured ${result.png.slice(result.png.lastIndexOf('/') + 1)} in ${result.png.slice(0, result.png.lastIndexOf('/'))}`;
+      const [copied, revealed] = await Promise.all([copyImageToClipboard(result.png), revealInFolder(result.png)]);
+      const extras = [copied ? 'copied to clipboard' : 'clipboard unavailable', revealed ? 'opened folder' : ''].filter(Boolean).join(', ');
+      message = `Captured ${result.png.slice(result.png.lastIndexOf('/') + 1)} — ${extras}`;
     } catch (error) { message = `Capture failed: ${(error as Error).message}`; }
     finally { busy = false; }
   };
