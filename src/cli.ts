@@ -107,8 +107,14 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
     '-c', `model_providers.teamai.base_url="http://${config.proxy.host}:${config.proxy.codexPort}/v1"`,
     '-c', 'model_providers.teamai.env_key="TEAMAI_PROXY_TOKEN"',
     '-c', 'model_providers.teamai.wire_api="responses"',
+    // Request-level failover (401/429/5xx) is the relay's job, so the client
+    // must not retry the initial request and double up on account rotation.
+    // Stream retries are different: a mid-body SSE cut from chatgpt.com is a
+    // known transient that direct Codex hides with its default of 5 retries.
+    // With 0 the first cut ended the turn as a hard "stream disconnected
+    // before completion" error and the in-flight answer was lost (2026-09-19).
     '-c', 'model_providers.teamai.request_max_retries=0',
-    '-c', 'model_providers.teamai.stream_max_retries=0',
+    '-c', 'model_providers.teamai.stream_max_retries=5',
   ];
   const result = spawnSync('codex', [...overrides, ...clientArgs], { stdio: 'inherit', env: { ...process.env, CODEX_HOME: shadow, TEAMAI_PROXY_TOKEN: config.proxy.clientToken } });
   if (result.error) throw result.error; process.exitCode = result.status ?? 1;
