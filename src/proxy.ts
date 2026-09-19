@@ -111,10 +111,15 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     }
     pool.commitProbe(path, incomingHeaders(req), body, response.headers);
     copyHeaders(response, res); res.writeHead(response.status);
+    // A stream that breaks after the 200 was written used to be logged as a
+    // plain 200, indistinguishable from success; the client saw a destroyed
+    // socket ("error decoding response body") and the relay showed nothing.
+    let cut: string | null = null;
     try {
       if (!response.body) res.end();
       else await pipeStream(response.body, res);
-    } finally { pool.release(account); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}`); }
+    } catch (error) { cut = (error as Error).message; throw error; }
+    finally { pool.release(account); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}${cut ? ` stream cut mid-body: ${cut}` : ''}`); }
     return;
   }
 }
