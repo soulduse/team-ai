@@ -2,6 +2,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AccountPool } from './account-pool.js';
 
+// Upper bound on waiting for upstream response headers only. Never applies to the body.
+const HEADER_TIMEOUT_MS = 300_000;
+
 const MAX_BODY = 32 * 1024 * 1024;
 
 export function secureEqual(a: string, b: string): boolean {
@@ -65,7 +68,18 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       const headers = pool.provider.buildHeaders(incomingHeaders(req), account);
       const sendBody = pool.provider.rewriteBody(body, account);
       headers.set('content-length', String(sendBody.length));
-      response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : new Uint8Array(sendBody), signal: AbortSignal.timeout(300_000) });
+      // AbortSignal.timeout(300_000) used to sit here, and it kept running
+      // while the body streamed: a turn that thought for more than five
+      // minutes was cut at exactly 300s and Claude Code showed "Connection
+      // lost mid-response" (2026-09-20, two turns). The guard is only meant
+      // to stop a request that never answers, so it is disarmed the moment
+      // headers arrive; a streaming body has no time limit. A client that
+      // goes away mid-stream is handled in pipeStream, so no slot leaks.
+      const headerGuard = new AbortController();
+      const headerTimer = setTimeout(() => headerGuard.abort(new Error('upstream sent no response headers within 300s')), HEADER_TIMEOUT_MS);
+      try {
+        response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : new Uint8Array(sendBody), signal: headerGuard.signal });
+      } finally { clearTimeout(headerTimer); }
     } catch (error) {
       pool.release(account); pool.cooldown(account, 2_000); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error; failover`);
       if (excluded.size >= pool.accounts.length) throw error;
