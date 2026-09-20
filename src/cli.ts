@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
+import { relayedCodexConfig } from './codex-config.js';
 import { isRedactLevel } from './redact.js';
 import { runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
@@ -99,7 +100,7 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
   }
   const shadow = join(process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai'), 'codex-home'); await mkdir(shadow, { recursive: true, mode: 0o700 });
   const originalHome = process.env.CODEX_HOME || join(homedir(), '.codex'); let original = ''; try { original = await readFile(join(originalHome, 'config.toml'), 'utf8'); } catch { /* optional */ }
-  await writeFile(join(shadow, 'config.toml'), original, { mode: 0o600 }); await chmod(shadow, 0o700);
+  await writeFile(join(shadow, 'config.toml'), relayedCodexConfig(original, config.proxy.host, config.proxy.codexPort), { mode: 0o600 }); await chmod(shadow, 0o700);
   for (const name of ['skills', 'plugins', 'rules']) { const source = join(originalHome, name); const target = join(shadow, name); try { await lstat(target); } catch { try { await lstat(source); await symlink(source, target, 'dir'); } catch { /* optional */ } } }
   const overrides = [
     '-c', 'model_provider="teamai"',
@@ -115,6 +116,15 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
     // before completion" error and the in-flight answer was lost (2026-09-19).
     '-c', 'model_providers.teamai.request_max_retries=0',
     '-c', 'model_providers.teamai.stream_max_retries=5',
+    // Codex declares a stream dead after stream_idle_timeout_ms without an SSE
+    // event (default 300s). A high-effort turn routinely thinks for longer than
+    // that before its first token, so the default cut live turns mid-reasoning
+    // and the client silently reconnected — which reads as a hung session, not
+    // an error (2026-09-20, gpt-5.6-luna --effort max: a 15-minute turn cut and
+    // retried, a second one lost after 10 minutes of silence). The relay
+    // forwards upstream chunks unbuffered and injects no keepalives, so this
+    // silence is upstream's and only the client's patience can cover it.
+    '-c', 'model_providers.teamai.stream_idle_timeout_ms=1800000',
   ];
   const result = spawnSync('codex', [...overrides, ...clientArgs], { stdio: 'inherit', env: { ...process.env, CODEX_HOME: shadow, TEAMAI_PROXY_TOKEN: config.proxy.clientToken } });
   if (result.error) throw result.error; process.exitCode = result.status ?? 1;
