@@ -21,6 +21,37 @@ function retryAfter(headers: Headers, fallback = 60_000): number {
   return Number.isFinite(date) ? Math.min(7 * 86_400_000, Math.max(1_000, date - Date.now())) : fallback;
 }
 
+// How long until the Codex window that just rejected the request actually
+// rolls over. Codex omits retry-after on a usage-limit 429 but always states
+// the reset on the window headers, with `resets_in_seconds`/`resets_at` in the
+// body as a second source. Prefer the window that is actually spent (100%);
+// clamp to the same bounds as retryAfter so a bad value cannot park an account
+// for longer than a week or un-bench it instantly.
+function codexResetMs(headers: Headers, body: string, fallback = 60_000): number {
+  const clamp = (ms: number): number => Math.min(7 * 86_400_000, Math.max(1_000, ms));
+  const spent: number[] = [];
+  const any: number[] = [];
+  for (const window of ['primary', 'secondary']) {
+    const after = Number(headers.get(`x-codex-${window}-reset-after-seconds`));
+    if (!Number.isFinite(after) || after <= 0) continue;
+    const used = Number(headers.get(`x-codex-${window}-used-percent`));
+    (Number.isFinite(used) && used >= 100 ? spent : any).push(after * 1000);
+  }
+  const fromHeaders = spent.length ? Math.min(...spent) : null;
+  if (fromHeaders !== null) return clamp(fromHeaders);
+  try {
+    const parsed = JSON.parse(body) as { error?: { resets_in_seconds?: unknown; resets_at?: unknown } };
+    const seconds = parsed.error?.resets_in_seconds;
+    if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) return clamp(seconds * 1000);
+    const at = parsed.error?.resets_at;
+    if (typeof at === 'number' && Number.isFinite(at) && at > 0) {
+      const ms = (at < 10_000_000_000 ? at * 1000 : at) - Date.now();
+      if (ms > 0) return clamp(ms);
+    }
+  } catch { /* not the JSON error shape */ }
+  return any.length ? clamp(Math.min(...any)) : fallback;
+}
+
 async function tokenRefresh(url: string, contentType: string, body: string): Promise<Record<string, unknown>> {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': contentType, accept: 'application/json' }, body, signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`OAuth refresh failed (${response.status})`);
@@ -218,7 +249,14 @@ export const codexProvider: Provider = {
   classifyFailure(status, headers, body) {
     if (status === 401) return { kind: 'auth', retryAfterMs: 0 };
     if (status === 403) return { kind: 'forbidden', retryAfterMs: 30 * 60_000 };
-    if (status === 429) return { kind: /usage_limit|quota|rate_limit_exceeded/i.test(body) ? 'quota' : 'transient', retryAfterMs: retryAfter(headers) };
+    if (status === 429) {
+      const exhausted = /usage_limit|quota|rate_limit_exceeded/i.test(body);
+      // Codex sends no retry-after when a weekly window is spent, so the generic
+      // 60s fallback used to un-bench an account ~2.9 days early and retry it
+      // once a minute forever. The real reset rides on the window headers (and
+      // is echoed in the body); fall back only when upstream named no reset.
+      return { kind: exhausted ? 'quota' : 'transient', retryAfterMs: exhausted ? codexResetMs(headers, body) : retryAfter(headers) };
+    }
     if (status >= 500) return { kind: 'transient', retryAfterMs: 1_000 };
     return { kind: 'fatal', retryAfterMs: 0 };
   },

@@ -142,3 +142,41 @@ test('a Fable-only 429 benches the model, not the account', () => {
   // No rejected status at all: a plain rate limit, retried rather than benched.
   assert.equal(kind({}), 'transient');
 });
+
+test('a spent Codex window is benched until its real reset, not the 60s fallback', () => {
+  // Captured from a live prolite account at 100%: Codex sends NO retry-after on
+  // a usage-limit 429, so the generic fallback used to bench it for 60s and let
+  // it be retried ~2.9 days early, once a minute, until the window rolled over.
+  const headers = new Headers({
+    'x-codex-primary-used-percent': '100',
+    'x-codex-primary-reset-after-seconds': '254862',
+    'x-codex-primary-window-minutes': '10080',
+    'x-codex-secondary-used-percent': '0',
+    'x-codex-secondary-reset-after-seconds': '0',
+  });
+  const body = JSON.stringify({ error: { type: 'usage_limit_reached', resets_at: 1790157088, resets_in_seconds: 254861 } });
+  const spent = codexProvider.classifyFailure(429, headers, body);
+  assert.equal(spent.kind, 'quota');
+  assert.equal(spent.retryAfterMs, 254862 * 1000);
+
+  // The body carries the reset too, so a header-less rejection still benches
+  // for the real window instead of a minute.
+  const fromBody = codexProvider.classifyFailure(429, new Headers(), body);
+  assert.equal(fromBody.kind, 'quota');
+  assert.equal(fromBody.retryAfterMs, 254861 * 1000);
+
+  // The window that is actually spent decides, not merely the first one listed.
+  const secondary = codexProvider.classifyFailure(429, new Headers({
+    'x-codex-primary-used-percent': '40', 'x-codex-primary-reset-after-seconds': '999',
+    'x-codex-secondary-used-percent': '100', 'x-codex-secondary-reset-after-seconds': '7200',
+  }), 'usage_limit_reached');
+  assert.equal(secondary.retryAfterMs, 7200 * 1000);
+
+  // Nothing named a reset: keep the old conservative minute.
+  assert.equal(codexProvider.classifyFailure(429, new Headers(), 'usage_limit_reached').retryAfterMs, 60_000);
+
+  // A transient 429 is untouched: it still honours retry-after and is not benched.
+  const transient = codexProvider.classifyFailure(429, new Headers({ 'retry-after': '3' }), '{"error":{"message":"slow down"}}');
+  assert.equal(transient.kind, 'transient');
+  assert.equal(transient.retryAfterMs, 3_000);
+});
