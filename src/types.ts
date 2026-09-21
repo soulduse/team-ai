@@ -127,6 +127,10 @@ export interface Provider {
   // Whether a request spends the model-weekly (Fable) budget. Providers without
   // such a split leave this undefined and every request ranks the same way.
   usesFableBudget?(path: string, body: Buffer): boolean;
+  // The client's own session identifier, so every request of one session lands
+  // on the same account and its prompt cache stays warm. null when the request
+  // names none; the proxy then falls back to per-connection identity.
+  sessionKey?(headers: Headers, body: Buffer): string | null;
   defaultProbe?(): ProbeTemplate | null;
   captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };

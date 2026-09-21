@@ -1,5 +1,9 @@
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
+// An empty exclusion set, for judging an account on its own merits rather than
+// on what one request has already tried.
+const NO_EXCLUSIONS = new Set<string>();
+
 export class AccountPool {
   readonly accounts: RuntimeAccount[];
   private affinity = new Map<string, string>();
@@ -17,7 +21,7 @@ export class AccountPool {
     return this.fableReserve < 1 && !AccountPool.fableSpent(account, this.fableReserve) && AccountPool.fableWindow(account)?.usage != null;
   }
 
-  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 16, readonly fableReserve = 0.8) {
+  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 16, readonly fableReserve = 0.8, readonly maxSessions = 4096) {
     this.accounts = stored.filter((a) => a.provider === provider.id && credentials[a.credentialId]).map((account) => {
       const saved = state.accounts[account.credentialId];
       // Restore the long-lived quota state (usage/windows/reset/profile) so the
@@ -215,12 +219,15 @@ export class AccountPool {
   // Opus, another session on Fable) splits across the pool by what each request
   // actually spends rather than all chasing the same window.
   acquire(session: string, excluded = new Set<string>(), wantsFable = true): RuntimeAccount | null {
-    const pinned = this.accounts.find((a) => a.id === this.affinity.get(session));
+    const key = AccountPool.affinityKey(session, wantsFable);
+    const pinned = this.accounts.find((a) => a.id === this.affinity.get(key));
     // Session affinity is a cache-locality preference, not a claim on the
-    // account. Honour it only while it agrees with what this request should
-    // spend: a session that once asked for Fable must not keep dragging its
-    // Opus turns onto the one account still holding Fable budget.
-    if (pinned && this.available(pinned, excluded, wantsFable) && (wantsFable || !this.reservesFable(pinned))) { pinned.inflight++; return pinned; }
+    // account. Honour it while the account can take the request and while the
+    // request should be spending here: an Opus turn leaves an account still
+    // holding Fable budget only when a spare exists to take it — early in the
+    // week every account reserves, and refusing the pin then just scatters
+    // the session over the fleet for nothing.
+    if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded)) { pinned.inflight++; this.remember(key, pinned.id); return pinned; }
     const rank = this.spread(wantsFable);
     const ranked = (lastResort: boolean) => this.accounts.filter((a) => this.available(a, excluded, wantsFable, lastResort)).sort((a, b) => {
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
@@ -229,9 +236,41 @@ export class AccountPool {
     // Prefer accounts under the switch threshold; only when none is left does
     // an account over it (but not spent) get the request rather than a 429.
     const selected = ranked(false)[0] || ranked(true)[0] || null;
-    if (selected) { selected.inflight++; this.affinity.set(session, selected.id); }
+    // A pinned account that is only excluded for this request (a transient
+    // failover) or at its concurrency cap is still the session's home: this
+    // request spills elsewhere, the pin stays, and the next turn comes back to
+    // its warm cache. Only a home that is genuinely gone is replaced.
+    if (selected) { selected.inflight++; if (!pinned || !this.isHome(pinned, wantsFable)) this.remember(key, selected.id); }
     return selected;
   }
+
+  // Fable turns and everything else pin separately. One Claude Code session
+  // sends both (Haiku classifiers between Fable turns), and a single pin was
+  // dragged from the Fable home to the spare on every model switch — after
+  // which the next Fable turn was ranked afresh and could land on a third
+  // account, cold.
+  private static affinityKey(session: string, wantsFable: boolean): string { return wantsFable ? session : `${session}#general`; }
+
+  // Record a pin most-recently-used last, bounded so a server that runs for
+  // weeks does not keep an entry for every session it ever saw.
+  private remember(key: string, id: string): void {
+    this.affinity.delete(key); this.affinity.set(key, id);
+    while (this.affinity.size > this.maxSessions) { const oldest = this.affinity.keys().next().value; if (oldest === undefined) break; this.affinity.delete(oldest); }
+  }
+
+  // Whether a non-Fable request should leave this account for one that does
+  // not reserve Fable — only when such an account can actually take it.
+  private divertsOff(account: RuntimeAccount, wantsFable: boolean, excluded: Set<string>): boolean {
+    return !wantsFable && this.reservesFable(account) && this.accounts.some((a) => a !== account && !this.reservesFable(a) && this.available(a, excluded, false));
+  }
+
+  // Whether an account is still a valid home for a session, judged without
+  // this request's exclusions or the concurrency cap: both are momentary.
+  private isHome(account: RuntimeAccount, wantsFable: boolean): boolean {
+    return this.availableIgnoringConcurrency(account, NO_EXCLUSIONS, wantsFable) && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
+  }
+
+  get pinnedSessions(): number { return this.affinity.size; }
 
   // Selection order for a new session. The static rankings compare exact
   // usage, which herds every new session onto whichever account is a point

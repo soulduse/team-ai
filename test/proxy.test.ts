@@ -3,6 +3,7 @@ import { createServer, request } from 'node:http';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
 import { createProxy } from '../src/proxy.js';
+import { claudeProvider, codexProvider } from '../src/providers.js';
 import type { OAuthCredential, PersistedState, Provider, StoredAccount } from '../src/types.js';
 
 test('proxy strips client secrets and fails quota account over to the next account', async () => {
@@ -247,5 +248,90 @@ test('an account over the switch threshold still serves when no other account ca
     assert.equal(res.status, 200, 'must not refuse while b still has 2% of its window');
     assert.ok(events.some((e) => /→ b@example\.com 200/.test(e)), `request should have gone upstream on b: ${events.join(' | ')}`);
     assert.equal(pool.accounts[1]!.inflight, 0);
+  } finally { proxy.close(); upstream.close(); }
+});
+
+// A fake upstream that records which account each request reached, keyed by
+// whichever header the real provider stamps on it (Claude: the bearer token,
+// Codex: chatgpt-account-id), and answers 200 with an SSE body.
+async function recordingUpstream(pick: (headers: Record<string, string | string[] | undefined>) => string | undefined): Promise<{ port: number; seen: string[]; close: () => void }> {
+  const seen: string[] = [];
+  const upstream = createServer(async (req, res) => {
+    req.resume(); await new Promise<void>((r) => req.once('end', r));
+    seen.push(pick(req.headers) ?? '?');
+    res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n');
+  });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const address = upstream.address(); assert(address && typeof address !== 'string');
+  return { port: address.port, seen, close: () => upstream.close() };
+}
+
+test('a Claude Code session stays on one account across connections', async () => {
+  // Captured live: Claude Code names its session in an x-claude-code-session-id
+  // header and again inside metadata.user_id. Node's fetch opens a fresh socket
+  // per request here, so a relay keyed by connection would spread these four
+  // requests over the fleet and cold-start the prompt cache each time.
+  const up = await recordingUpstream((h) => String(h.authorization).replace('Bearer s-', ''));
+  const provider: Provider = { ...claudeProvider, upstreamBase: `http://127.0.0.1:${up.port}`, readQuota: () => null, refresh: async (c) => c };
+  const st = (id: string): StoredAccount => ({ id, provider: 'claude', label: id, enabled: true, priority: null, credentialId: id, createdAt: '' });
+  const cred = (id: string): OAuthCredential => ({ accessToken: `s-${id}`, refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [st('a'), st('b'), st('c')], { a: cred('a'), b: cred('b'), c: cred('c') }, { version: 1, accounts: {} });
+  const proxy = createProxy(pool, 'local-secret', () => {});
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  const send = async (headers: Record<string, string>, body: string): Promise<void> => { const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages?beta=true`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', ...headers }, body }); assert.equal(res.status, 200); await res.text(); };
+  try {
+    for (let i = 0; i < 3; i++) await send({ 'x-claude-code-session-id': 'sess-1' }, '{}');
+    // No header: the same id inside metadata.user_id must reach the same account.
+    await send({}, JSON.stringify({ metadata: { user_id: JSON.stringify({ device_id: 'd', account_uuid: '', session_id: 'sess-1' }) } }));
+    assert.equal(up.seen.length, 4);
+    assert.equal(new Set(up.seen).size, 1, `one session, one account — got ${up.seen.join(',')}`);
+  } finally { proxy.close(); up.close(); }
+});
+
+test('a Codex session stays on one account across connections', async () => {
+  // Captured live from `codex exec`: a plain session-id header, plus
+  // x-codex-window-id carrying the same id with a :N window suffix.
+  const up = await recordingUpstream((h) => String(h['chatgpt-account-id']));
+  const provider: Provider = { ...codexProvider, upstreamBase: `http://127.0.0.1:${up.port}`, readQuota: () => null, refresh: async (c) => c };
+  const st = (id: string): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority: null, credentialId: id, createdAt: '' });
+  const cred = (id: string): OAuthCredential => ({ accessToken: `s-${id}`, refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [st('a'), st('b'), st('c')], { a: cred('a'), b: cred('b'), c: cred('c') }, { version: 1, accounts: {} });
+  const proxy = createProxy(pool, 'local-secret', () => {});
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  const send = async (headers: Record<string, string>): Promise<void> => { const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', ...headers }, body: '{}' }); assert.equal(res.status, 200); await res.text(); };
+  try {
+    await send({ 'session-id': 'thread-1' }); await send({ 'session-id': 'thread-1' });
+    await send({ 'x-codex-window-id': 'thread-1:0' });
+    assert.equal(up.seen.length, 3);
+    assert.equal(new Set(up.seen).size, 1, `one session, one account — got ${up.seen.join(',')}`);
+  } finally { proxy.close(); up.close(); }
+});
+
+test('a transient 429 spills one request elsewhere without re-homing the session', async () => {
+  // The first request to account a is throttled, so it fails over to b. That
+  // is a one-request diversion: the session's next request must come back to
+  // a, whose prompt cache is the one that is warm.
+  const seen: string[] = []; let throttled = false;
+  const upstream = createServer(async (req, res) => {
+    req.resume(); await new Promise<void>((r) => req.once('end', r));
+    const account = String(req.headers.authorization).replace('Bearer s-', ''); seen.push(account);
+    if (account === 'a' && !throttled) { throttled = true; res.writeHead(429, { 'content-type': 'application/json' }); res.end('{"error":"slow down"}'); return; }
+    res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n');
+  });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: `http://127.0.0.1:${up.port}`,
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (incoming, account) => { const h = new Headers(incoming); h.set('authorization', `Bearer ${account.credential.accessToken}`); return h; },
+    classifyFailure: (status) => status === 429 ? { kind: 'transient', retryAfterMs: 60_000 } : { kind: 'fatal', retryAfterMs: 0 },
+    sessionKey: (headers) => headers.get('session-id'),
+  };
+  const st = (id: string, priority: number): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority, credentialId: id, createdAt: '' });
+  const cred = (id: string): OAuthCredential => ({ accessToken: `s-${id}`, refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [st('a', 1), st('b', 2)], { a: cred('a'), b: cred('b') }, { version: 1, accounts: {} });
+  const proxy = createProxy(pool, 'local-secret', () => {});
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    for (let i = 0; i < 2; i++) { const res: Response = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'session-id': 't1' }, body: '{}' }); assert.equal(res.status, 200); await res.text(); }
+    assert.deepEqual(seen, ['a', 'b', 'a']);
   } finally { proxy.close(); upstream.close(); }
 });

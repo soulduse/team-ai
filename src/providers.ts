@@ -52,6 +52,22 @@ function codexResetMs(headers: Headers, body: string, fallback = 60_000): number
   return any.length ? clamp(Math.min(...any)) : fallback;
 }
 
+// The identity Claude Code tucks into metadata.user_id: a JSON string carrying
+// device_id, account_uuid and session_id. Null when the body is not that shape.
+function claudeIdentity(body: Buffer): Record<string, unknown> | null {
+  if (body.length === 0) return null;
+  try {
+    const parsed = JSON.parse(body.toString('utf8')) as { metadata?: { user_id?: unknown } };
+    if (typeof parsed.metadata?.user_id !== 'string') return null;
+    const identity = JSON.parse(parsed.metadata.user_id) as unknown;
+    return identity && typeof identity === 'object' ? identity as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
+// A session key as the client named it, or null. Bounded so a runaway header
+// cannot bloat the affinity map: real ids are UUIDs.
+function sessionId(value: unknown): string | null { return typeof value === 'string' && value.length > 0 ? value.slice(0, 200) : null; }
+
 async function tokenRefresh(url: string, contentType: string, body: string): Promise<Record<string, unknown>> {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': contentType, accept: 'application/json' }, body, signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`OAuth refresh failed (${response.status})`);
@@ -161,6 +177,12 @@ export const claudeProvider: Provider = {
       return /fable/i.test(parsed.model);
     } catch { return true; }
   },
+  // One Claude Code session names itself twice: a header on every request and
+  // the same id inside metadata.user_id. The header is read first so a
+  // multi-megabyte body is only parsed when a client sends no header.
+  sessionKey(headers, body) {
+    return sessionId(headers.get('x-claude-code-session-id')) ?? sessionId(claudeIdentity(body)?.session_id);
+  },
   defaultProbe() {
     // The shape Claude Code itself sends. Subscription (OAuth) credentials are
     // rejected for anything that doesn't look like the official client, so this
@@ -222,6 +244,17 @@ export const codexProvider: Provider = {
     return headers;
   },
   rewriteBody(body) { return body; },
+  // Codex sends its thread id as a plain `session-id` header; the window id is
+  // the same id with a `:N` window suffix. The body keys are the Responses
+  // API's own conversation handles, for a client that chains on those instead:
+  // prompt_cache_key is fixed for a session by design, previous_response_id
+  // changes every turn, so the former must win or such a client never sticks.
+  sessionKey(headers, body) {
+    const fromHeaders = sessionId(headers.get('session-id')) ?? sessionId(headers.get('x-codex-window-id')?.replace(/:\d+$/, ''));
+    if (fromHeaders) return fromHeaders;
+    if (body.length === 0) return null;
+    try { const value = JSON.parse(body.toString('utf8')) as Record<string, unknown>; return sessionId(value.prompt_cache_key) ?? sessionId(value.previous_response_id); } catch { return null; }
+  },
   readQuota(headers) {
     const codexWindows = ['primary', 'secondary'].flatMap((window) => {
       const used = Number(headers.get(`x-codex-${window}-used-percent`));

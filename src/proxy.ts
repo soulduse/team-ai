@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { AccountPool } from './account-pool.js';
+import type { Provider } from './types.js';
 
 // Upper bound on waiting for upstream response headers only. Never applies to the body.
 const HEADER_TIMEOUT_MS = 300_000;
@@ -18,7 +20,16 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(parts);
 }
 function incomingHeaders(req: IncomingMessage): Headers { const headers = new Headers(); for (const [k, v] of Object.entries(req.headers)) { if (Array.isArray(v)) v.forEach((x) => headers.append(k, x)); else if (v !== undefined) headers.set(k, v); } return headers; }
-function sessionKey(req: IncomingMessage, body: Buffer): string { const explicit = req.headers['session_id'] || req.headers['conversation_id']; if (explicit) return String(explicit); try { const value = JSON.parse(body.toString()) as Record<string, unknown>; return String(value.previous_response_id || value.prompt_cache_key || req.socket.remotePort || randomUUID()); } catch { return String(req.socket.remotePort || randomUUID()); } }
+// Which session a request belongs to, for account affinity. The provider reads
+// the client's own id (Claude Code's x-claude-code-session-id, Codex's
+// session-id); a request that names none is keyed by its connection, so a
+// keep-alive client still sticks. Connection identity, not the port number: a
+// port is recycled by the OS the moment a connection closes, and two unrelated
+// sessions used to share one key that way while one session's parallel
+// connections were spread over several accounts.
+const connectionIds = new WeakMap<Socket, string>();
+function connectionId(socket: Socket): string { let id = connectionIds.get(socket); if (!id) { id = randomUUID(); connectionIds.set(socket, id); } return id; }
+function sessionKey(provider: Provider, req: IncomingMessage, body: Buffer): string { return provider.sessionKey?.(incomingHeaders(req), body) || connectionId(req.socket); }
 
 export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number): Server {
   return createServer(async (req, res) => {
@@ -37,7 +48,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       pool.inFlightProxied++;
       try {
         const body = await readBody(req);
-        await dispatch(req, res, body, path, pool, sessionKey(req, body), onChange);
+        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange);
       } finally { pool.inFlightProxied--; }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
   });

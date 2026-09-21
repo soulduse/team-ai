@@ -326,3 +326,61 @@ test('a clearly lighter account still wins over a busier one with fewer requests
   pool.accounts[1]!.windows = { '7d': { usage: 0.6, resetsAt: now + 86_400_000 } }; pool.accounts[1]!.usage = 0.6; pool.accounts[1]!.inflight = 0;
   assert.equal(pool.acquire('s', new Set(), false)!.id, 'light');
 });
+
+test('a pin survives a failover that excludes the home for one request only', () => {
+  const pool = new AccountPool(provider, [account('a', 1), account('b', 2)], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state);
+  const first = pool.acquire('s'); assert.equal(first?.id, 'a'); pool.release(first!);
+  // This request has already failed on a (a transient 429): it spills to b.
+  const spill = pool.acquire('s', new Set(['a'])); assert.equal(spill?.id, 'b'); pool.release(spill!);
+  assert.equal(pool.acquire('s')?.id, 'a', 'the next request returns to the warm home');
+});
+
+test('a pin survives the home being at its concurrency cap', () => {
+  const pool = new AccountPool(provider, [account('a', 1), account('b', 2)], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state, 0.98, 1);
+  const first = pool.acquire('s'); assert.equal(first?.id, 'a');
+  const spill = pool.acquire('s'); assert.equal(spill?.id, 'b', 'a is full, so this one spills');
+  pool.release(first!); pool.release(spill!);
+  assert.equal(pool.acquire('s')?.id, 'a', 'once a slot frees up the session is back home');
+});
+
+test('a home that is genuinely spent is replaced, and the session settles there', () => {
+  const pool = new AccountPool(provider, [account('a', 1), account('b', 2)], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state);
+  const first = pool.acquire('s'); assert.equal(first?.id, 'a'); pool.release(first!);
+  const a = pool.accounts.find((x) => x.id === 'a')!; a.cooldownUntil = Date.now() + 60_000;
+  const moved = pool.acquire('s'); assert.equal(moved?.id, 'b'); pool.release(moved!);
+  a.cooldownUntil = null;
+  assert.equal(pool.acquire('s')?.id, 'b', 'the new home is kept even once the old one recovers');
+});
+
+test('the affinity map is bounded, dropping the least recently used session', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state, 0.98, 16, 0.8, 2);
+  for (const session of ['s1', 's2', 's3']) { const got = pool.acquire(session); assert.ok(got); pool.release(got); }
+  assert.equal(pool.pinnedSessions, 2);
+});
+
+test('a session that mixes Fable and other models keeps a home for each', () => {
+  // Claude Code sends Haiku classifier calls between Fable turns. With one pin
+  // per session, the Haiku call moved the pin to the spare and the next Fable
+  // turn was ranked afresh — possibly onto a third, cold account.
+  const pool = fableFleet();
+  const fable = pool.acquire('s', new Set(), true); assert.equal(fable?.id, 'reserved'); pool.release(fable!);
+  const other = pool.acquire('s', new Set(), false); assert.equal(other?.id, 'spare'); pool.release(other!);
+  const again = pool.acquire('s', new Set(), true); assert.equal(again?.id, 'reserved', 'the Fable turn returns to its own home'); pool.release(again!);
+  assert.equal(pool.acquire('s', new Set(), false)?.id, 'spare', 'and the other-model turn to its own');
+});
+
+test('non-Fable sessions stay pinned while every account still reserves Fable', () => {
+  // Early in the week no account has spent its Fable budget, so there is no
+  // spare to divert to. Refusing the pin then just scatters the session.
+  const ids = ['x', 'y', 'z'];
+  const win = (general: number, fable: number) => ({ usage: general, resetsAt: null, windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const pool = new AccountPool(provider, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: Object.fromEntries(ids.map((id) => [`codex:${id}`, win(0.5, 0.3)])) }, 0.98, 3, 0.8);
+  const first = pool.acquire('s', new Set(), false); assert.ok(first); pool.release(first);
+  // Make every other account look lighter, so a fresh ranking would leave.
+  for (const a of pool.accounts) if (a.id !== first.id) { a.usage = 0.1; a.windows = { ...a.windows, '7d': { usage: 0.1, resetsAt: null } }; }
+  const second = pool.acquire('s', new Set(), false); assert.equal(second?.id, first.id, 'no spare exists, so the pin holds'); pool.release(second!);
+  // A spare appears: the non-Fable session moves there once and settles.
+  const spare = pool.accounts.find((a) => a.id !== first.id)!; spare.windows = { ...spare.windows, '7d_oi': { usage: 1, resetsAt: null } };
+  const moved = pool.acquire('s', new Set(), false); assert.equal(moved?.id, spare.id); pool.release(moved!);
+  assert.equal(pool.acquire('s', new Set(), false)?.id, spare.id);
+});

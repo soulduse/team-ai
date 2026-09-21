@@ -180,3 +180,25 @@ test('a spent Codex window is benched until its real reset, not the 60s fallback
   assert.equal(transient.kind, 'transient');
   assert.equal(transient.retryAfterMs, 3_000);
 });
+
+test('a Codex client that chains on the body keys sticks by prompt_cache_key, not the per-turn response id', () => {
+  // prompt_cache_key is fixed for a session by design; previous_response_id is
+  // a different id on every turn. Reading the latter first gave such a client
+  // a new affinity key per turn — no stickiness at all.
+  const body = (turn: number) => Buffer.from(JSON.stringify({ prompt_cache_key: 'thread-9', previous_response_id: `resp_${turn}` }));
+  assert.equal(codexProvider.sessionKey!(new Headers(), body(1)), 'thread-9');
+  assert.equal(codexProvider.sessionKey!(new Headers(), body(2)), 'thread-9');
+  // Headers still win over the body, and the window id folds onto the session id.
+  assert.equal(codexProvider.sessionKey!(new Headers({ 'session-id': 's', 'x-codex-window-id': 's:0' }), body(3)), 's');
+  assert.equal(codexProvider.sessionKey!(new Headers({ 'x-codex-window-id': 's:2' }), Buffer.alloc(0)), 's');
+  assert.equal(codexProvider.sessionKey!(new Headers(), Buffer.alloc(0)), null);
+});
+
+test('Claude Code names its session in a header, or inside metadata.user_id when the header is absent', () => {
+  const identity = JSON.stringify({ device_id: 'd', account_uuid: '', session_id: 'sess-7' });
+  const body = Buffer.from(JSON.stringify({ model: 'claude-sonnet-5', metadata: { user_id: identity } }));
+  assert.equal(claudeProvider.sessionKey!(new Headers({ 'x-claude-code-session-id': 'hdr-1' }), body), 'hdr-1');
+  assert.equal(claudeProvider.sessionKey!(new Headers(), body), 'sess-7');
+  assert.equal(claudeProvider.sessionKey!(new Headers(), Buffer.from('{"model":"x"}')), null);
+  assert.equal(claudeProvider.sessionKey!(new Headers({ 'x-claude-code-session-id': 'x'.repeat(500) }), Buffer.alloc(0))?.length, 200);
+});
