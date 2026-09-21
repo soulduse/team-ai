@@ -344,21 +344,29 @@ export class AccountPool {
   // Sequential on purpose: after a long downtime the whole fleet can be due at
   // once, and firing every refresh together would burst the token endpoint into
   // a rate limit that errors accounts that were merely idle. One at a time.
-  async refreshLapsed(): Promise<number> {
-    if (this.sweepInFlight) return 0;
+  async refreshLapsed(): Promise<{ healed: number; failed: number }> {
+    if (this.sweepInFlight) return { healed: 0, failed: 0 };
     this.sweepInFlight = true;
     try {
       const now = Date.now();
       const due = this.accounts.filter((a) => a.credential.refreshToken
         && (a.error !== null || a.credential.expiresAt === null || a.credential.expiresAt < now + 5 * 60_000));
+      let healed = 0; let failed = 0;
       for (const account of due) {
         // Force when the account errored or its expiry is unknown: refresh()'s
         // own gate skips a token that still looks valid, but an errored account
         // needs the attempt to heal and a null expiry never trips the gate at
         // all. A merely-expiring token passes the gate on its own.
-        await this.refresh(account, account.error !== null || account.credential.expiresAt === null).catch(() => { /* stays errored until the token heals */ });
+        //
+        // A refusal is recorded on the account, not swallowed: this sweep used
+        // to report every attempt as "refreshed" while two dead tokens stayed
+        // expired for a day, showing as active the whole time. An account whose
+        // token cannot be renewed cannot serve, so it is benched here until a
+        // later sweep — or a re-login adopted by adoptCredentials — heals it.
+        try { await this.refresh(account, account.error !== null || account.credential.expiresAt === null); healed++; }
+        catch (error) { failed++; account.error = `token refresh failed: ${(error as Error).message}`; }
       }
-      return due.length;
+      return { healed, failed };
     } finally {
       this.sweepInFlight = false;
     }
@@ -550,6 +558,26 @@ export class AccountPool {
       }
       return quota !== null;
     } catch { return false; }
+  }
+
+  // Take over any credential on disk that is newer than the one held here.
+  // A re-login runs in the TUI process and writes straight to credentials.json;
+  // this server never re-read that file for an account it already had, and
+  // worse, its next save wrote the stale token back over the fresh one — so a
+  // re-login for an existing account silently did nothing while the server
+  // ran. Newer means a later expiry: a token the server refreshed itself is
+  // newer than disk and stays; a token the user just minted is newer than
+  // memory and wins. Adopting one clears the account's error, since the whole
+  // point of the re-login was to replace a token that could not be renewed.
+  adoptCredentials(latest: Record<string, OAuthCredential>): number {
+    let adopted = 0;
+    for (const account of this.accounts) {
+      const fresh = latest[account.credentialId];
+      if (!fresh || fresh.expiresAt === null || fresh.accessToken === account.credential.accessToken) continue;
+      if (account.credential.expiresAt !== null && fresh.expiresAt <= account.credential.expiresAt) continue;
+      account.credential = fresh; account.error = null; adopted++;
+    }
+    return adopted;
   }
 
   async refreshProfiles(): Promise<number> {

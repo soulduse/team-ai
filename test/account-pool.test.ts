@@ -219,7 +219,7 @@ test('refreshLapsed refreshes errored and expiring accounts, skips healthy ones'
     { 'codex:err': cred('err', now + 60 * 60_000), 'codex:soon': cred('soon', now + 60_000), 'codex:healthy': cred('healthy', now + 60 * 60_000), 'codex:notoken': { accessToken: 't', refreshToken: null, expiresAt: now + 60_000, accountId: 'notoken' } }, state);
   pool.accounts.find((a) => a.id === 'err')!.error = 'boom';
   const count = await pool.refreshLapsed();
-  assert.equal(count, 2);
+  assert.deepEqual(count, { healed: 2, failed: 0 });
   assert.deepEqual(refreshed.sort(), ['err', 'soon']); // healthy skipped; notoken has no refresh token
 });
 
@@ -383,4 +383,31 @@ test('non-Fable sessions stay pinned while every account still reserves Fable', 
   const spare = pool.accounts.find((a) => a.id !== first.id)!; spare.windows = { ...spare.windows, '7d_oi': { usage: 1, resetsAt: null } };
   const moved = pool.acquire('s', new Set(), false); assert.equal(moved?.id, spare.id); pool.release(moved!);
   assert.equal(pool.acquire('s', new Set(), false)?.id, spare.id);
+});
+
+test('a re-login written to disk is adopted over the stale token held in memory', () => {
+  const pool = new AccountPool(provider, [account('a'), account('b')], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state);
+  const a = pool.accounts.find((x) => x.id === 'a')!; a.error = 'token refresh failed: 400'; const stale = a.credential;
+  // Same token as memory, and an older one: neither is a re-login.
+  assert.equal(pool.adoptCredentials({ 'codex:a': { ...stale }, 'codex:b': { ...credential('b'), accessToken: 'old', expiresAt: stale.expiresAt! - 1 } }), 0);
+  assert.equal(a.error, 'token refresh failed: 400');
+  const fresh = { ...credential('a'), accessToken: 'minted-now', expiresAt: stale.expiresAt! + 3_600_000 };
+  assert.equal(pool.adoptCredentials({ 'codex:a': fresh }), 1);
+  assert.equal(a.credential.accessToken, 'minted-now', 'the newer token wins');
+  assert.equal(a.error, null, 'the re-login replaces the token that could not be renewed');
+  // A token the server refreshed itself is newer than disk and must not be reverted.
+  a.credential = { ...a.credential, accessToken: 'server-refreshed', expiresAt: fresh.expiresAt + 3_600_000 };
+  assert.equal(pool.adoptCredentials({ 'codex:a': fresh }), 0);
+  assert.equal(a.credential.accessToken, 'server-refreshed');
+});
+
+test('the lapsed-token sweep reports only real renewals and benches a token that cannot be renewed', async () => {
+  const flaky: Provider = { ...provider, refresh: async (c) => { if (c.accountId === 'b') throw new Error('invalid_grant'); return { ...c, accessToken: 'renewed', expiresAt: Date.now() + 3_600_000 }; } };
+  const expired = (id: string) => ({ ...credential(id), expiresAt: Date.now() - 1 });
+  const pool = new AccountPool(flaky, [account('a'), account('b')], { 'codex:a': expired('a'), 'codex:b': expired('b') }, state);
+  assert.deepEqual(await pool.refreshLapsed(), { healed: 1, failed: 1 });
+  const a = pool.accounts.find((x) => x.id === 'a')!; const b = pool.accounts.find((x) => x.id === 'b')!;
+  assert.equal(a.credential.accessToken, 'renewed'); assert.equal(a.error, null);
+  assert.match(b.error!, /token refresh failed: invalid_grant/);
+  assert.equal(pool.acquire('s')?.id, 'a', 'the account with a dead token is not routed to');
 });

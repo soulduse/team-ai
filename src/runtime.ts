@@ -28,7 +28,10 @@ export async function runServer(): Promise<void> {
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200);
-  const persistNow = async (): Promise<void> => { const next: PersistedState = { version: 1, accounts: {}, events }; pools.forEach((p) => p.exportState(next)); const updated = await loadCredentials(); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
+  // Every save first adopts any credential the TUI wrote since (a re-login),
+  // then writes memory back — so a fresh token is picked up within a save
+  // interval instead of being overwritten by the stale one it replaced.
+  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next: PersistedState = { version: 1, accounts: {}, events }; pools.forEach((p) => p.exportState(next)); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
   const persist = (event?: string): void => { if (event) { events.push({ at: Date.now(), message: event }); if (events.length > 200) events.splice(0, events.length - 200); } if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; saving = saving.then(persistNow, persistNow); }, 25); };
   const servers: Server[] = [];
   for (const pool of pools) {
@@ -90,7 +93,9 @@ export async function runServer(): Promise<void> {
   // Token keep-alive: refresh idle accounts' lapsing tokens so a chain that
   // never rotates does not get invalidated upstream. Runs once now and every
   // five minutes; the sweep itself is sequential to avoid a token-endpoint burst.
-  const refreshLapsed = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshLapsed()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed ${count} lapsed token(s)`); };
+  // The sweep always schedules a save, even with nothing to report, so an idle
+  // fleet still adopts a re-login (see persistNow) within five minutes.
+  const refreshLapsed = async (): Promise<void> => { const results = await Promise.all(pools.map((pool) => pool.refreshLapsed())); const healed = results.reduce((a, r) => a + r.healed, 0); const failed = results.reduce((a, r) => a + r.failed, 0); if (healed) persist(`Refreshed ${healed} lapsed token(s)`); if (failed) persist(`${failed} token refresh(es) failed — re-login needed`); if (!healed && !failed) persist(); };
   setImmediate(() => void refreshLapsed()); const lapsedTimer = setInterval(() => void refreshLapsed(), 5 * 60_000); lapsedTimer.unref();
   // Local control channel: the TUI runs in a separate process, so a fleet-wide
   // quota re-measure (R) has to reach the pools living here. Bound to the proxy
