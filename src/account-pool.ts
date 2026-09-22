@@ -33,7 +33,7 @@ export class AccountPool {
       // retry-after came back to park seven accounts across restarts. If the
       // account really is spent, the next request re-derives the right cooldown
       // (model-quota → Fable only, real quota → whole account).
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -151,7 +151,7 @@ export class AccountPool {
   // benches the account — better than refusing on a number we chose ourselves.
   private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>, wantsFable = true, lastResort = false): boolean {
     const now = Date.now();
-    if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; }
+    if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; }
     const limit = lastResort ? 1 : this.threshold;
     if (!(account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < limit))) return false;
     if (wantsFable && AccountPool.fableSpent(account, 1)) return false;
@@ -229,7 +229,13 @@ export class AccountPool {
     // the session over the fleet for nothing.
     if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded)) { pinned.inflight++; this.remember(key, pinned.id); return pinned; }
     const rank = this.spread(wantsFable);
+    // An explicit priority orders accounts within the same reservation tier,
+    // never across it: a #1 account still holding Fable budget used to take
+    // every Opus and Haiku turn ahead of a spare whose Fable was already
+    // spent, burning the one budget only Fable turns can use.
+    const diverts = (a: RuntimeAccount) => this.divertsOff(a, wantsFable, excluded) ? 1 : 0;
     const ranked = (lastResort: boolean) => this.accounts.filter((a) => this.available(a, excluded, wantsFable, lastResort)).sort((a, b) => {
+      const tier = diverts(a) - diverts(b); if (tier) return tier;
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
       return rank(a, b);
     });
@@ -265,8 +271,18 @@ export class AccountPool {
   }
 
   // Whether an account is still a valid home for a session, judged without
-  // this request's exclusions or the concurrency cap: both are momentary.
+  // this request's exclusions or the concurrency cap: both are momentary. So
+  // is a network cooldown — one connection attempt failed, and the account is
+  // benched for two seconds while the request goes elsewhere. Reading that as
+  // "the home is gone" moved sessions off perfectly good accounts whenever a
+  // blip landed between two turns more than two seconds apart, cold-starting
+  // the next turn for nothing. Only a quota or forbidden cooldown evicts.
   private isHome(account: RuntimeAccount, wantsFable: boolean): boolean {
+    if (account.cooldownReason === 'network') {
+      const now = Date.now();
+      const still = account.enabled && !account.error && (account.usage === null || account.usage < this.threshold) && !(wantsFable && AccountPool.fableSpent(account, 1));
+      return still && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
+    }
     return this.availableIgnoringConcurrency(account, NO_EXCLUSIONS, wantsFable) && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
   }
 
@@ -311,7 +327,7 @@ export class AccountPool {
     const plan = headers.get('x-codex-plan-type');
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
   }
-  cooldown(account: RuntimeAccount, ms: number): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); }
+  cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
 
   // Upstream refused this account for the top model only. Record the Fable
   // window as spent rather than cooling the account down: every other model is
@@ -384,7 +400,7 @@ export class AccountPool {
       for (const [name, window] of Object.entries(account.windows)) {
         if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; changed = true; }
       }
-      if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; changed = true; }
+      if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; changed = true; }
       if (changed) { this.warmupTries.delete(account.credentialId); swept++; }
     }
     return swept;
@@ -458,7 +474,7 @@ export class AccountPool {
         next.push(Object.assign(live, { label: account.label, enabled: account.enabled, priority: account.priority }));
       } else {
         added++;
-        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0 });
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
@@ -546,7 +562,7 @@ export class AccountPool {
       // reported as unmeasured instead of inflating the M/N the TUI shows.
       const quota = this.provider.readQuota(response.headers, text);
       if (quota) { account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; }
-      if (response.ok) { account.error = null; account.cooldownUntil = null; }
+      if (response.ok) { account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownReason = null; }
       // A rejection that only names the model-weekly window says the account is
       // spent for the top model, not unusable: an ordinary probe (the default
       // model) still succeeds here. Clearing the bench on that reading is what
@@ -554,7 +570,7 @@ export class AccountPool {
       // cooldown it was given was the weekly retry-after, which no other model
       // has to wait for.
       else if (!modelOverride && this.provider.classifyFailure(response.status, response.headers, text).kind === 'model-quota') {
-        account.error = null; account.cooldownUntil = null;
+        account.error = null; account.cooldownUntil = null; account.cooldownReason = null;
       }
       return quota !== null;
     } catch { return false; }

@@ -98,6 +98,9 @@ export interface RuntimeAccount extends StoredAccount {
   usage: number | null;
   resetsAt: number | null;
   cooldownUntil: number | null;
+  // Why the account is cooling down: a network cooldown benches it for a
+  // moment but does not make it a lost home; a quota/forbidden one does.
+  cooldownReason: 'network' | 'quota' | 'forbidden' | null;
   lastUsed: number | null;
   error: string | null;
   windows: Record<string, QuotaWindow>;

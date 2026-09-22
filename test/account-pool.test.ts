@@ -60,7 +60,7 @@ test('a fully spent fleet is ordered by which account frees up soonest', () => {
   const spent = (id: string, resetsIn: number, weekly: number) => ({
     ...account(id), credential: credential(id), usage: weekly, resetsAt: Date.now() + resetsIn,
     windows: { '7d_oi': { usage: 1, resetsAt: Date.now() + resetsIn } },
-    profile: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0,
+    profile: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0,
   });
   // The LATER account has the lower weekly usage on purpose: once both are
   // spent, time-to-reset decides, not who used less getting there.
@@ -110,7 +110,7 @@ test('byHeadroom still orders accounts the pool would refuse to route to', () =>
   const spent = (id: string, resetsIn: number) => ({
     ...account(id), credential: credential(id), usage: 1, resetsAt: Date.now() + resetsIn,
     windows: { primary: { usage: 1, resetsAt: Date.now() + resetsIn } },
-    profile: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0,
+    profile: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0,
   });
   const later = spent('later', 120 * hour); const sooner = spent('sooner', 48 * hour);
   assert.ok(AccountPool.byHeadroom(sooner, later) < 0);
@@ -410,4 +410,36 @@ test('the lapsed-token sweep reports only real renewals and benches a token that
   assert.equal(a.credential.accessToken, 'renewed'); assert.equal(a.error, null);
   assert.match(b.error!, /token refresh failed: invalid_grant/);
   assert.equal(pool.acquire('s')?.id, 'a', 'the account with a dead token is not routed to');
+});
+
+test('a network cooldown benches the account for this request but does not evict the session', () => {
+  // One connection attempt failed and the account is benched for two seconds.
+  // That used to read as "the home is gone", so a blip landing between two
+  // turns more than two seconds apart moved the session to a cold account.
+  const pool = new AccountPool(provider, [account('a', 1), account('b', 2)], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state);
+  const first = pool.acquire('s'); assert.equal(first?.id, 'a'); pool.release(first!);
+  const a = pool.accounts.find((x) => x.id === 'a')!;
+  pool.cooldown(a, 2_000, 'network');
+  const spill = pool.acquire('s'); assert.equal(spill?.id, 'b', 'this request still goes elsewhere'); pool.release(spill!);
+  a.cooldownUntil = null; a.cooldownReason = null;
+  assert.equal(pool.acquire('s')?.id, 'a', 'the pin survived the blip');
+  // A quota cooldown is a real eviction: the session settles on the spare.
+  const again = pool.acquire('s'); pool.release(again!);
+  pool.cooldown(a, 60_000, 'quota');
+  const moved = pool.acquire('s'); assert.equal(moved?.id, 'b'); pool.release(moved!);
+  a.cooldownUntil = null; a.cooldownReason = null;
+  assert.equal(pool.acquire('s')?.id, 'b', 'a quota cooldown re-homes the session for good');
+});
+
+test('an explicit priority orders accounts within a reservation tier, not across it', () => {
+  // 'reserved' still holds Fable budget and is priority #1; 'spare' has spent
+  // its Fable. A non-Fable turn must go to the spare regardless of priority,
+  // or the #1 account's Fable budget is burned on turns that cannot use it.
+  const ids = ['spare', 'reserved'];
+  const stored = [account('spare', 2), account('reserved', 1)];
+  const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
+  const win = (general: number, fable: number) => ({ usage: general, resetsAt: null, windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:spare': win(0.5, 1), 'codex:reserved': win(0.05, 0.04) } }, 0.98, 3, 0.8);
+  assert.equal(pool.acquire('s1', new Set(), false)?.id, 'spare', 'non-Fable turn skips the reserving #1 account');
+  assert.equal(pool.acquire('s2', new Set(), true)?.id, 'reserved', 'Fable turn still honours priority');
 });
