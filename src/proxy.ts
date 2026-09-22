@@ -58,10 +58,34 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   const excluded = new Set<string>(); let authRetried = false;
   // Decided once from the request body: the retry loop must not re-read a body
   // it has already forwarded, and the answer cannot change between failovers.
-  const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? true;
+  const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? false;
+  let lastFailure: { response: Response; body: string; transient: boolean } | null = null;
+  const transientAccounts = new Set<string>();
+  let retryRounds = 0;
+  let retryWaitMs = 0;
+  let nextRetryAt = 0;
   while (!res.destroyed) {
     const account = pool.acquire(session, excluded, wantsFable);
     if (!account) {
+      // Exhausting this request's candidates does not mean exhausting quota.
+      // Only retry explicit pre-stream transient HTTP failures; never replay a
+      // successful/partially streamed response. Keep retries in the relay.
+      if (lastFailure) {
+        const delay = Math.max(1000 * 2 ** retryRounds, nextRetryAt - Date.now()) + Math.floor(Math.random() * 200);
+        if (lastFailure.transient && transientAccounts.size && retryRounds < 2 && delay <= 10_000 && retryWaitMs + delay <= 20_000) {
+          retryRounds++; retryWaitMs += delay;
+          onChange(`${pool.provider.label} transient retry ${retryRounds}/2 after ${delay}ms`);
+          await waitForRetry(delay, res);
+          if (res.destroyed) return;
+          for (const id of transientAccounts) excluded.delete(id);
+          transientAccounts.clear(); nextRetryAt = 0;
+          continue;
+        }
+        copyHeaders(lastFailure.response, res);
+        res.writeHead(lastFailure.response.status); res.end(lastFailure.body);
+        onChange(`${pool.provider.label} ${req.method} ${path} → ${lastFailure.response.status} upstream failure preserved`);
+        return;
+      }
       // Say what is actually short — a free slot (retry in a moment) or budget
       // (and whose, and until when) — and leave a trace in the activity log:
       // this 429 never reached upstream, so nothing else records it.
@@ -92,15 +116,26 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : new Uint8Array(sendBody), signal: headerGuard.signal });
       } finally { clearTimeout(headerTimer); }
     } catch (error) {
-      pool.release(account); pool.cooldown(account, 2_000); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error; failover`);
+      lastFailure = { response: new Response(null, { status: 502 }), body: JSON.stringify({ error: 'Upstream connection failed' }), transient: false };
+      pool.release(account); pool.cooldown(account, 2_000, 'network'); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error; failover`);
       if (excluded.size >= pool.accounts.length) throw error;
       continue;
     }
     pool.updateQuota(account, response.headers);
     if (!response.ok) {
-      const errorBody = await response.text();
+      // Read the error body before releasing the slot, but never leak the slot
+      // if the read itself fails: an upstream that closes the connection
+      // mid-body used to throw out of here with inflight still counted, and
+      // after enough such cuts the account sat at its concurrency cap with
+      // quota to spare, shown active, serving nothing until a restart.
+      let errorBody: string;
+      try { errorBody = await response.text(); } catch (error) { pool.release(account); throw error; }
       const decision = pool.provider.classifyFailure(response.status, response.headers, errorBody);
       pool.release(account);
+      // A transient failure keeps its place as the request's failure of record:
+      // a later quota or forbidden rejection on another account must not turn
+      // a retryable 503 into a quota answer while retry rounds remain.
+      if (!(lastFailure?.transient && transientAccounts.size && decision.kind !== 'transient')) lastFailure = { response, body: errorBody, transient: decision.kind === 'transient' };
       if (decision.kind === 'auth' && !authRetried) {
         authRetried = true;
         try { await pool.refresh(account, true); } catch (error) { pool.fail(account, (error as Error).message); excluded.add(account.id); }
@@ -122,15 +157,23 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // down — a request-rate/global 429 throttled onto the account would poison
       // the fleet for unrelated requests, and a burst across the fleet would
       // bench every account at once. Exclude it for THIS request only and fail
-      // over; when every account has been tried the 429 passes through to the
-      // client, which backs off on its own. No account state is mutated.
+      // over; when no account remains, bounded retry rounds run above before
+      // the original error is returned. No quota state is mutated.
       if (decision.kind === 'transient') {
         excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} transient; failover`);
-        if (excluded.size < pool.accounts.length) continue;
+        transientAccounts.add(account.id);
+        nextRetryAt = Math.max(nextRetryAt, Date.now() + decision.retryAfterMs);
+        continue;
       }
       if (decision.kind === 'quota' || decision.kind === 'forbidden') {
-        pool.cooldown(account, decision.retryAfterMs); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}; failover`);
-        if (excluded.size < pool.accounts.length) continue;
+        pool.cooldown(account, decision.retryAfterMs, decision.kind); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}; failover`);
+        // A spent account after a transient one must not end the request: the
+        // transient account still has its retry rounds, and the decision block
+        // at the top of the loop owns that — it returns the preserved failure
+        // itself when no retry applies. Returning here abandoned the transient
+        // retry and answered a 2-second 503 with a quota 429.
+        if (transientAccounts.size) lastFailure = { response: lastFailure!.response, body: lastFailure!.body, transient: true };
+        continue;
       }
       copyHeaders(response, res); res.writeHead(response.status); res.end(errorBody); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}`); return;
     }
@@ -147,6 +190,16 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     finally { pool.release(account); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}${cut ? ` stream cut mid-body: ${cut}` : ''}`); }
     return;
   }
+}
+
+// Cancellation must release admission capacity without waiting out backoff.
+async function waitForRetry(ms: number, res: ServerResponse): Promise<void> {
+  if (res.destroyed) return;
+  await new Promise<void>((resolve) => {
+    const done = () => { clearTimeout(timer); res.removeListener('close', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    res.once('close', done);
+  });
 }
 
 // Forward the upstream body chunk by chunk, honouring backpressure. The client

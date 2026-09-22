@@ -335,3 +335,27 @@ test('a transient 429 spills one request elsewhere without re-homing the session
     assert.deepEqual(seen, ['a', 'b', 'a']);
   } finally { proxy.close(); upstream.close(); }
 });
+
+test('an error body that is cut mid-read still releases the account slot', async () => {
+  // Upstream sends a 500 status then destroys the socket before the body
+  // arrives. The relay throws to the client (502), and the account it had
+  // acquired must not keep a phantom in-flight request.
+  const upstream = createServer((req, res) => { req.resume(); res.writeHead(500, { 'content-type': 'application/json', 'content-length': '64' }); res.write('{"error":'); setTimeout(() => res.destroy(), 20); });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: `http://127.0.0.1:${up.port}`,
+    normalizePath: () => '/codex/responses', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
+    buildHeaders: (incoming, account) => { const h = new Headers(incoming); h.set('authorization', `Bearer ${account.credential.accessToken}`); return h; },
+    classifyFailure: () => ({ kind: 'transient', retryAfterMs: 1_000 }),
+  };
+  const st = (id: string): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority: null, credentialId: id, createdAt: '' });
+  const pool = new AccountPool(provider, [st('a')], { a: { accessToken: 's-a', refreshToken: null, expiresAt: null, accountId: 'a' } }, { version: 1, accounts: {} });
+  const proxy = createProxy(pool, 'local-secret', () => {});
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
+  try {
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(res.status, 502); await res.text().catch(() => {});
+    assert.equal(pool.accounts[0]!.inflight, 0, 'the slot is returned even though the body read threw');
+    assert.equal(pool.inFlightProxied, 0);
+  } finally { proxy.closeAllConnections(); upstream.closeAllConnections(); await Promise.all([new Promise<void>((r) => proxy.close(() => r())), new Promise<void>((r) => upstream.close(() => r()))]); }
+});

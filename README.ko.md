@@ -194,3 +194,8 @@ npm run lint
 ```
 
 파생 저작물 관련은 [NOTICE](NOTICE), 로컬 보안 모델은 [SECURITY.md](SECURITY.md)를 참고하세요.
+
+> Translation update pending: see the canonical English README for nested Codex relay configuration inheritance.
+
+<!-- transient-recovery-2026-09-22 -->
+일시적인 상위 서버 오류는 원래 HTTP 상태·본문·Retry-After를 유지합니다. 계정 전환 후 최대 2회 재시도하며, 대기는 회당 10초·합계 20초 이내입니다. 더 긴 대기는 클라이언트에 전달하고 성공한 스트림은 재실행하지 않습니다. 중복 재시도를 막기 위해 Codex HTTP 재시도는 계속 비활성화합니다. 빌드 후 릴레이를 재시작해야 적용됩니다.

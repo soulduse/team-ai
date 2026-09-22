@@ -151,7 +151,7 @@ export const claudeProvider: Provider = {
       // account: fall back to the safe reading and bench the whole account.
       return { kind: 'quota', retryAfterMs: retryAfter(headers) };
     }
-    if (status >= 500) return { kind: 'transient', retryAfterMs: 1_000 };
+    if (status >= 500) return { kind: 'transient', retryAfterMs: retryAfter(headers, 1_000) };
     return { kind: 'fatal', retryAfterMs: 0 };
   },
   async refresh(credential) {
@@ -257,7 +257,9 @@ export const codexProvider: Provider = {
   },
   readQuota(headers) {
     const codexWindows = ['primary', 'secondary'].flatMap((window) => {
-      const used = Number(headers.get(`x-codex-${window}-used-percent`));
+      const rawUsed = headers.get(`x-codex-${window}-used-percent`);
+      if (rawUsed === null || rawUsed.trim() === '') return [];
+      const used = Number(rawUsed);
       if (!Number.isFinite(used)) return [];
       const after = Number(headers.get(`x-codex-${window}-reset-after-seconds`));
       const at = headers.get(`x-codex-${window}-reset-at`);
@@ -283,14 +285,23 @@ export const codexProvider: Provider = {
     if (status === 401) return { kind: 'auth', retryAfterMs: 0 };
     if (status === 403) return { kind: 'forbidden', retryAfterMs: 30 * 60_000 };
     if (status === 429) {
-      const exhausted = /usage_limit|quota|rate_limit_exceeded/i.test(body);
+      let codes: string[] = [];
+      try {
+        const parsed = JSON.parse(body);
+        codes = [parsed?.error?.code, parsed?.error?.type, parsed?.code].filter((v): v is string => typeof v === 'string');
+      } catch { codes = [body.trim()]; }
+      const exhausted = codes.some((code) => /^(usage_limit_reached|insufficient_quota|quota_exceeded|credit_balance_exhausted|organization_spend_limit_exceeded|project_spend_limit_exceeded|organization_usage_limit_exceeded)$/.test(code)) ||
+        ['primary', 'secondary'].some((window) => {
+          const used = headers.get(`x-codex-${window}-used-percent`);
+          return used !== null && Number(used) >= 100;
+        });
       // Codex sends no retry-after when a weekly window is spent, so the generic
       // 60s fallback used to un-bench an account ~2.9 days early and retry it
       // once a minute forever. The real reset rides on the window headers (and
       // is echoed in the body); fall back only when upstream named no reset.
       return { kind: exhausted ? 'quota' : 'transient', retryAfterMs: exhausted ? codexResetMs(headers, body) : retryAfter(headers) };
     }
-    if (status >= 500) return { kind: 'transient', retryAfterMs: 1_000 };
+    if (status >= 500) return { kind: 'transient', retryAfterMs: retryAfter(headers, 1_000) };
     return { kind: 'fatal', retryAfterMs: 0 };
   },
   async refresh(credential: OAuthCredential) {
