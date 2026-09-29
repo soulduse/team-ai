@@ -25,6 +25,17 @@ function bar(usage: number | null | undefined, reset: number | null | undefined,
   return `${ESC}${bg};97m${text.slice(0, filled)}${ESC}100;37m${text.slice(filled)}${RESET}`;
 }
 
+// How old a row's figures are. Headers refresh only the accounts the proxy
+// routes to and the usage sweep runs on a timer, so without this a number
+// nobody has re-read looks exactly like a live one. Dim while fresh, yellow
+// once it is older than a few sweeps would allow.
+function age(at: number | null | undefined): string {
+  if (!at) return color(90, 'unmeasured');
+  const mins = Math.max(0, Math.floor((Date.now() - at) / 60_000));
+  const text = mins < 1 ? 'now' : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`;
+  return color(mins > 15 ? 33 : 90, text);
+}
+
 function healthy(profile: SubscriptionProfile | null | undefined): boolean { return !profile?.status || ['active', 'trialing'].includes(profile.status); }
 // ChatGPT plan ids are lowercase slugs ('pro', 'prolite', 'plus', 'team'); show
 // them the way the product names them so a Codex row reads like a Claude one.
@@ -158,11 +169,11 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-        lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored}`);
+        lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}`);
       } else {
         const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
         const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');
-        lines.push(`${head} ${gauges || color(90, 'no quota data yet')}`);
+        lines.push(`${head} ${gauges ? `${gauges} ${age(saved?.measuredAt)}` : color(90, 'no quota data yet')}`);
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
