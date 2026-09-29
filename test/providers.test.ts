@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { claudeProvider, codexProvider } from '../src/providers.js';
+import { claudeProvider, claudeUsageQuota, codexProvider, codexUsageQuota } from '../src/providers.js';
 import type { RuntimeAccount } from '../src/types.js';
 
 const account = { id: 'acct', provider: 'codex', label: 'a', enabled: true, priority: null, credentialId: 'c', createdAt: '', credential: { accessToken: 'secret', refreshToken: null, expiresAt: null, accountId: 'account-1' }, usage: null, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0 } as RuntimeAccount;
@@ -201,4 +201,38 @@ test('Claude Code names its session in a header, or inside metadata.user_id when
   assert.equal(claudeProvider.sessionKey!(new Headers(), body), 'sess-7');
   assert.equal(claudeProvider.sessionKey!(new Headers(), Buffer.from('{"model":"x"}')), null);
   assert.equal(claudeProvider.sessionKey!(new Headers({ 'x-claude-code-session-id': 'x'.repeat(500) }), Buffer.alloc(0))?.length, 200);
+});
+
+test('reads Claude /api/oauth/usage limits into the header window names', () => {
+  // Shape captured from a live Max account (2026-09-29).
+  const quota = claudeUsageQuota({
+    five_hour: { utilization: 18, resets_at: '2026-09-29T10:30:00+00:00' },
+    seven_day: { utilization: 80, resets_at: '2026-10-01T18:00:00+00:00' },
+    limits: [
+      { kind: 'session', percent: 18, resets_at: '2026-09-29T10:30:00+00:00', scope: null },
+      { kind: 'weekly_all', percent: 80, resets_at: '2026-10-01T18:00:00+00:00', scope: null },
+      { kind: 'weekly_scoped', percent: 12, resets_at: '2026-10-01T18:00:00+00:00', scope: { model: { display_name: 'Fable' } } },
+    ],
+  });
+  assert.equal(quota?.windows['5h']?.usage, 0.18);
+  assert.equal(quota?.windows['7d']?.usage, 0.8);
+  assert.equal(quota?.windows['7d_oi']?.usage, 0.12);
+  assert.equal(quota?.windows['7d_oi']?.resetsAt, Date.parse('2026-10-01T18:00:00+00:00'));
+  assert.equal(quota?.routingUsage, 0.8);
+});
+
+test('falls back to the legacy Claude usage fields when limits is absent', () => {
+  const quota = claudeUsageQuota({ five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 40, resets_at: '2026-10-01T18:00:00Z' } });
+  assert.equal(quota?.windows['5h']?.usage, 0.05);
+  assert.equal(quota?.windows['7d']?.usage, 0.4);
+  assert.equal(quota?.windows['7d_oi'], undefined);
+  assert.equal(claudeUsageQuota({}), null);
+});
+
+test('reads Codex /wham/usage windows with their length in minutes', () => {
+  const quota = codexUsageQuota({ rate_limit: { primary_window: { used_percent: 21, limit_window_seconds: 604800, reset_after_seconds: 379997, reset_at: 1791047442 }, secondary_window: null } });
+  assert.deepEqual(quota?.windows.primary, { usage: 0.21, resetsAt: 1791047442000, minutes: 10080 });
+  assert.equal(quota?.windows.secondary, undefined);
+  assert.equal(quota?.routingUsage, 0.21);
+  assert.equal(codexUsageQuota({ rate_limit: null }), null);
 });

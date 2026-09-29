@@ -60,7 +60,7 @@ test('a fully spent fleet is ordered by which account frees up soonest', () => {
   const spent = (id: string, resetsIn: number, weekly: number) => ({
     ...account(id), credential: credential(id), usage: weekly, resetsAt: Date.now() + resetsIn,
     windows: { '7d_oi': { usage: 1, resetsAt: Date.now() + resetsIn } },
-    profile: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0,
+    profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0,
   });
   // The LATER account has the lower weekly usage on purpose: once both are
   // spent, time-to-reset decides, not who used less getting there.
@@ -110,7 +110,7 @@ test('byHeadroom still orders accounts the pool would refuse to route to', () =>
   const spent = (id: string, resetsIn: number) => ({
     ...account(id), credential: credential(id), usage: 1, resetsAt: Date.now() + resetsIn,
     windows: { primary: { usage: 1, resetsAt: Date.now() + resetsIn } },
-    profile: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0,
+    profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0,
   });
   const later = spent('later', 120 * hour); const sooner = spent('sooner', 48 * hour);
   assert.ok(AccountPool.byHeadroom(sooner, later) < 0);
@@ -442,4 +442,44 @@ test('an explicit priority orders accounts within a reservation tier, not across
   const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:spare': win(0.5, 1), 'codex:reserved': win(0.05, 0.04) } }, 0.98, 3, 0.8);
   assert.equal(pool.acquire('s1', new Set(), false)?.id, 'spare', 'non-Fable turn skips the reserving #1 account');
   assert.equal(pool.acquire('s2', new Set(), true)?.id, 'reserved', 'Fable turn still honours priority');
+});
+
+test('refreshUsage re-reads only readings older than the limit, busy accounts included', async () => {
+  const read: string[] = [];
+  const usageProvider: Provider = { ...provider, fetchUsage: async (c) => { read.push(c.accountId); return { routingUsage: 0.4, routingResetsAt: null, windows: { primary: { usage: 0.4, resetsAt: null } } }; } };
+  const pool = new AccountPool(usageProvider, [account('stale'), account('fresh'), account('busy'), account('broken')], { 'codex:stale': credential('stale'), 'codex:fresh': credential('fresh'), 'codex:busy': credential('busy'), 'codex:broken': credential('broken') }, state);
+  const [stale, fresh, busy, broken] = pool.accounts;
+  stale!.measuredAt = Date.now() - 10 * 60_000; fresh!.measuredAt = Date.now() - 60_000; busy!.inflight = 1; broken!.error = 'token refresh failed';
+  const measured = await pool.refreshUsage(5 * 60_000);
+  assert.deepEqual([...measured].sort(), ['busy', 'stale']);
+  assert.deepEqual(read.sort(), ['busy', 'stale']);
+  assert.equal(stale!.windows.primary?.usage, 0.4);
+  assert.ok(Date.now() - stale!.measuredAt! < 1_000);
+});
+
+test('R reads usage first and probes only the accounts the endpoint could not read', async () => {
+  const probed: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: { headers: Record<string, string> }) => { probed.push(init.headers.authorization!); return new Response(null, { status: 200 }); }) as typeof fetch;
+  try {
+    const usageProvider: Provider = {
+      ...provider,
+      fetchUsage: async (c) => { if (c.accountId === 'down') throw new Error('usage 503'); return { routingUsage: 0.2, routingResetsAt: null, windows: { primary: { usage: 0.2, resetsAt: null } } }; },
+      defaultProbe: () => ({ path: '/p', model: 'm', version: '', beta: null, system: null, userAgent: null, query: '', elicitsModelWeekly: false }),
+      probeRequest: (_t, c) => ({ url: 'https://example.test/p', headers: { authorization: c.accountId }, body: '{}' }),
+    };
+    const pool = new AccountPool(usageProvider, [account('up'), account('down')], { 'codex:up': credential('up'), 'codex:down': credential('down') }, state);
+    const result = await pool.probeAll();
+    assert.deepEqual(probed, ['down']);
+    assert.equal(result.targets, 2);
+    assert.equal(result.measured, 1);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('measuredAt survives a restart via exported state', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state);
+  pool.accounts[0]!.measuredAt = 1234;
+  const output: PersistedState = { version: 1, accounts: {} }; pool.exportState(output);
+  const restored = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, output);
+  assert.equal(restored.accounts[0]!.measuredAt, 1234);
 });

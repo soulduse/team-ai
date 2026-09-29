@@ -80,6 +80,10 @@ export interface AccountRuntimeState {
   cooldownUntil: number | null;
   lastUsed: number | null;
   error: string | null;
+  // When the quota figures above were last read from upstream, by any route
+  // (response headers, the usage endpoint, a probe). The dashboard shows their
+  // age so a number nobody has re-read does not pass for a live one.
+  measuredAt?: number | null;
 }
 
 export interface PersistedState {
@@ -105,6 +109,7 @@ export interface RuntimeAccount extends StoredAccount {
   error: string | null;
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
+  measuredAt: number | null;
   inflight: number;
 }
 
@@ -138,6 +143,10 @@ export interface Provider {
   captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };
   fetchProfile?(credential: OAuthCredential): Promise<SubscriptionProfile>;
+  // The subscription's own usage read-out — what the client's /usage (Claude)
+  // or /status (Codex) screen shows. Unlike a probe it is not a model call, so
+  // it spends no quota and can run on a timer across the whole fleet.
+  fetchUsage?(credential: OAuthCredential): Promise<QuotaSnapshot | null>;
 }
 
 // Why the pool could not hand out an account, shaped for the 429 the client

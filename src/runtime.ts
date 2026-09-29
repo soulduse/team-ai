@@ -71,17 +71,21 @@ export async function runServer(): Promise<void> {
       }
     }
   }
-  // Periodic warm-up: fill in accounts the dashboard shows as unmeasured —
-  // including ones whose window just rolled over — without waiting for the user
-  // to press R or for client traffic to happen to reach them. Only unmeasured
-  // accounts are probed, so a settled fleet costs nothing per tick.
+  // Periodic warm-up. First every account whose figures are older than half a
+  // tick is re-read from the usage endpoint, which spends no quota — so usage
+  // run up outside this proxy shows without pressing R, and no reading is ever
+  // much older than one tick. Accounts live traffic keeps fresh are skipped.
+  // Then anything still unmeasured (the endpoint failed, or the provider has
+  // none) is probed, which does spend quota and so is kept to that remainder.
   const warmupIntervalMs = config.warmupIntervalMs ?? 5 * 60_000;
   if (warmupIntervalMs > 0) {
     const runWarmup = async (): Promise<void> => {
       const swept = pools.reduce((total, pool) => total + pool.sweepExpired(), 0);
+      const refreshed = (await Promise.all(pools.map((pool) => pool.refreshUsage(warmupIntervalMs / 2)))).reduce((a, b) => a + b.size, 0);
       const measured = (await Promise.all(pools.map((pool) => pool.warmup().catch(() => 0)))).reduce((a, b) => a + b, 0);
       if (measured) persist(`Warm-up measured ${measured} account(s)${swept ? ` after ${swept} window reset(s)` : ''}`);
       else if (swept) persist(`${swept} quota window(s) reset`);
+      else if (refreshed) persist();
     };
     const warmupTimer = setInterval(() => void runWarmup(), warmupIntervalMs);
     warmupTimer.unref();
@@ -116,7 +120,7 @@ export async function runServer(): Promise<void> {
     }
     const results = await Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll()));
     const total = results.reduce((acc, r) => ({ targets: acc.targets + r.targets, measured: acc.measured + r.measured }), { targets: 0, measured: 0 });
-    const ready = pools.some((p) => p.hasProbe());
+    const ready = total.measured > 0 || pools.some((p) => p.hasProbe());
     if (total.targets) persist(`Quota re-measure: ${total.measured}/${total.targets} account(s)`);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ...total, ready, ...changes }));

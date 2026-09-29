@@ -1,4 +1,4 @@
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
 // An empty exclusion set, for judging an account on its own merits rather than
 // on what one request has already tried.
@@ -13,6 +13,7 @@ export class AccountPool {
   readonly maxWarmupTries = 3;
   private refreshes = new Map<string, Promise<void>>();
   private sweepInFlight = false;
+  private usageRead: Promise<unknown> | null = null;
 
   // Accounts still holding Fable budget are kept for Fable. An account measured
   // below this line reserves its remainder; at or above it, it is the preferred
@@ -33,7 +34,7 @@ export class AccountPool {
       // retry-after came back to park seven accounts across restarts. If the
       // account really is spent, the next request re-derives the right cooldown
       // (model-quota → Fable only, real quota → whole account).
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -321,11 +322,14 @@ export class AccountPool {
   release(account: RuntimeAccount): void { account.inflight = Math.max(0, account.inflight - 1); account.lastUsed = Date.now(); }
   updateQuota(account: RuntimeAccount, headers: Headers, body?: string): void {
     const quota = this.provider.readQuota(headers, body);
-    if (quota) { account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; }
+    if (quota) this.applyQuota(account, quota);
     // A live plan header is fresher than the one decoded from the token at
     // login, so a plan change shows up without re-authenticating.
     const plan = headers.get('x-codex-plan-type');
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
+  }
+  private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot): void {
+    account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = Date.now();
   }
   cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
 
@@ -406,6 +410,41 @@ export class AccountPool {
     return swept;
   }
 
+  // Re-read quota from the provider's usage endpoint for every account whose
+  // last reading is older than maxAgeMs. Response headers only ever update the
+  // accounts this proxy routes to, so an account spent through another client
+  // on the same subscription kept its old figure until someone pressed R. The
+  // endpoint is not a model call and spends no quota, which is what makes a
+  // fleet-wide timer affordable where a probe was not. Busy accounts are read
+  // too: this takes no request slot. Returns the ids it measured, so a caller
+  // can fall back to probing only the rest.
+  //
+  // A read already running is waited out rather than skipped: R pressed during
+  // a timer read would otherwise see nothing measured and probe the whole fleet.
+  async refreshUsage(maxAgeMs: number): Promise<Set<string>> {
+    const measured = new Set<string>();
+    if (!this.provider.fetchUsage) return measured;
+    while (this.usageRead) await this.usageRead;
+    const read = (async () => {
+      const cutoff = Date.now() - maxAgeMs;
+      const due = this.accounts.filter((a) => !a.error && (a.measuredAt ?? 0) <= cutoff);
+      await Promise.all(due.map(async (account) => {
+        try {
+          await this.refresh(account);
+          const started = Date.now();
+          const quota = await this.provider.fetchUsage!(account.credential);
+          // A proxied response may have landed while this read was in flight;
+          // its headers are newer than this snapshot, so they are kept.
+          if (quota && (account.measuredAt ?? 0) < started) { this.applyQuota(account, quota); measured.add(account.id); }
+          else if (quota) measured.add(account.id);
+        } catch { /* a failed read leaves the account to the probe fallback */ }
+      }));
+    })();
+    this.usageRead = read;
+    try { await read; } finally { this.usageRead = null; }
+    return measured;
+  }
+
   // Accounts worth a background probe: idle, not errored, and still without a
   // reading. The attempt cap stops an account whose upstream never reports
   // quota from being probed on every tick forever; it is cleared whenever a
@@ -474,7 +513,7 @@ export class AccountPool {
         next.push(Object.assign(live, { label: account.label, enabled: account.enabled, priority: account.priority }));
       } else {
         added++;
-        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
@@ -513,29 +552,32 @@ export class AccountPool {
 
   hasProbe(): boolean { return this.probeTemplate !== null && Boolean(this.provider.probeRequest); }
 
-  // Force a fleet-wide quota re-measure (TUI 'R'). Replays the committed
-  // template against every idle account, including already-measured and
-  // throttled ones: an exhausted account's 429 still carries authoritative
-  // quota headers. Tokens are refreshed first — an idle account past its token
-  // lifetime is the main reason a refresh would otherwise measure nothing.
-  // Returns { targets, measured } so the TUI can report honest M/N.
+  // Force a fleet-wide quota re-measure (TUI 'R'). The usage endpoint reads
+  // every account first, busy ones included, at no quota cost; only accounts it
+  // could not read fall back to replaying the committed probe template. An
+  // exhausted account's 429 still carries authoritative quota headers, so the
+  // fallback covers throttled accounts too. Tokens are refreshed first — an
+  // idle account past its token lifetime is the main reason a read would
+  // otherwise measure nothing. Returns { targets, measured } so the TUI can
+  // report honest M/N.
   async probeAll(): Promise<{ targets: number; measured: number }> {
+    this.warmupTries.clear();
+    const viaUsage = await this.refreshUsage(0);
     // Fall back to the shape this provider knows its client sends. A pool whose
     // accounts are ALL exhausted never serves a request, so it can never capture
     // a template from live traffic — and would stay permanently unmeasurable,
     // which is exactly when the numbers matter most.
     if (!this.probeTemplate && this.provider.defaultProbe) this.probeTemplate = this.provider.defaultProbe();
-    if (!this.hasProbe() || this.probing) return { targets: 0, measured: 0 };
+    if (!this.hasProbe() || this.probing) return { targets: this.accounts.length, measured: viaUsage.size };
     this.probing = true;
     try {
-      this.warmupTries.clear();
       const targets = this.accounts.filter((a) => a.inflight === 0);
       await Promise.all(targets.map((a) => this.refresh(a).catch(() => { /* surfaced below */ })));
       // Re-check inflight after the await: a live request may have been routed
       // to an account while tokens were refreshing, and a probe does not go
       // through acquire/release, so probing it would exceed maxConcurrent.
       const alive = targets.filter((a) => !a.error && a.inflight === 0);
-      const results = await Promise.all(alive.map((a) => this.probeOne(a)));
+      const results = await Promise.all(alive.filter((a) => !viaUsage.has(a.id)).map((a) => this.probeOne(a)));
       // Model-weekly (Fable) top-up: that window only appears on responses to
       // Fable-tier requests, so an account measured by an ordinary probe keeps
       // a blank Fbl bar forever. Re-probe those once with the Fable model.
@@ -544,7 +586,7 @@ export class AccountPool {
         const missing = alive.filter((a) => !Object.keys(a.windows).some((name) => /^7d_[a-z0-9]+$/i.test(name)));
         if (missing.length) await Promise.all(missing.map((a) => this.probeOne(a, fableModel)));
       }
-      return { targets: targets.length, measured: results.filter(Boolean).length };
+      return { targets: this.accounts.length, measured: viaUsage.size + results.filter(Boolean).length };
     } finally { this.probing = false; }
   }
 
@@ -561,7 +603,7 @@ export class AccountPool {
       // it read, so a header-less response (a 400/404, an upstream hiccup) is
       // reported as unmeasured instead of inflating the M/N the TUI shows.
       const quota = this.provider.readQuota(response.headers, text);
-      if (quota) { account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; }
+      if (quota) this.applyQuota(account, quota);
       if (response.ok) { account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownReason = null; }
       // A rejection that only names the model-weekly window says the account is
       // spent for the top model, not unusable: an ordinary probe (the default
@@ -614,7 +656,7 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
+    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
   }
 }

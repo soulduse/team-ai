@@ -1,4 +1,4 @@
-import type { OAuthCredential, Provider } from './types.js';
+import type { OAuthCredential, Provider, QuotaSnapshot, QuotaWindow } from './types.js';
 
 // accept-encoding is dropped too: fetch negotiates and decompresses on its own,
 // and echoing the client's preference upstream only invites a compressed body we
@@ -85,6 +85,45 @@ function timestamp(raw: string | null): number | null {
   if (/^\d+(?:\.\d+)?$/.test(raw) && Number.isFinite(numeric)) return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
   const parsed = Date.parse(raw);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+// Claude's /api/oauth/usage, reduced to the windows the proxy already names
+// from response headers: `limits` carries the session, the weekly total and
+// the model-scoped weekly (Fable) bucket, each with its own reset. The legacy
+// five_hour/seven_day fields back it up for a response without `limits`.
+interface ClaudeUsageLimit { kind?: string; percent?: number; resets_at?: string | null; scope?: { model?: { display_name?: string | null } | null } | null }
+interface ClaudeUsageWindow { utilization?: number | null; resets_at?: string | null }
+export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; five_hour?: ClaudeUsageWindow | null; seven_day?: ClaudeUsageWindow | null }): QuotaSnapshot | null {
+  const windows: Record<string, QuotaWindow> = {};
+  const put = (name: string, percent: number | null | undefined, reset: string | null | undefined): void => {
+    if (typeof percent === 'number' && Number.isFinite(percent)) windows[name] = { usage: Math.max(0, Math.min(1, percent / 100)), resetsAt: timestamp(reset ?? null) };
+  };
+  for (const limit of data.limits ?? []) {
+    if (limit.kind === 'session') put('5h', limit.percent, limit.resets_at);
+    else if (limit.kind === 'weekly_all') put('7d', limit.percent, limit.resets_at);
+    else if (limit.kind === 'weekly_scoped' && /fable/i.test(limit.scope?.model?.display_name ?? '')) put('7d_oi', limit.percent, limit.resets_at);
+  }
+  if (!windows['5h']) put('5h', data.five_hour?.utilization, data.five_hour?.resets_at);
+  if (!windows['7d']) put('7d', data.seven_day?.utilization, data.seven_day?.resets_at);
+  if (!Object.keys(windows).length) return null;
+  const routing = ['5h', '7d'].map((name) => windows[name]).filter((x) => x?.usage != null).sort((a, b) => (b?.usage ?? 0) - (a?.usage ?? 0))[0];
+  return { routingUsage: routing?.usage ?? null, routingResetsAt: routing?.resetsAt ?? null, windows };
+}
+
+// Codex's /wham/usage: the same primary/secondary windows the x-codex-* headers
+// carry, with the window length in seconds rather than minutes.
+interface CodexUsageWindow { used_percent?: number | null; limit_window_seconds?: number | null; reset_after_seconds?: number | null; reset_at?: number | null }
+export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsageWindow | null; secondary_window?: CodexUsageWindow | null } | null }): QuotaSnapshot | null {
+  const windows: Record<string, QuotaWindow> = {};
+  for (const [name, window] of [['primary', data.rate_limit?.primary_window], ['secondary', data.rate_limit?.secondary_window]] as const) {
+    if (!window || typeof window.used_percent !== 'number' || !Number.isFinite(window.used_percent)) continue;
+    const reset = typeof window.reset_at === 'number' && window.reset_at > 0 ? (window.reset_at < 10_000_000_000 ? window.reset_at * 1000 : window.reset_at)
+      : typeof window.reset_after_seconds === 'number' && window.reset_after_seconds > 0 ? Date.now() + window.reset_after_seconds * 1000 : null;
+    const minutes = typeof window.limit_window_seconds === 'number' && window.limit_window_seconds > 0 ? Math.round(window.limit_window_seconds / 60) : null;
+    windows[name] = { usage: Math.max(0, Math.min(1, window.used_percent / 100)), resetsAt: reset, minutes };
+  }
+  const binding = Object.values(windows).sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0))[0];
+  return binding ? { routingUsage: binding.usage, routingResetsAt: binding.resetsAt, windows } : null;
 }
 
 export const claudeProvider: Provider = {
@@ -225,6 +264,11 @@ export const claudeProvider: Provider = {
     const data = await response.json() as { account?: { has_claude_max?: boolean; has_claude_pro?: boolean }; organization?: { subscription_status?: string; subscription_created_at?: string; rate_limit_tier?: string; organization_type?: string } };
     return { status: data.organization?.subscription_status ?? null, createdAt: data.organization?.subscription_created_at ?? null, rateLimitTier: data.organization?.rate_limit_tier ?? null, orgType: data.organization?.organization_type ?? null, hasClaudeMax: data.account?.has_claude_max ?? null, hasClaudePro: data.account?.has_claude_pro ?? null, fetchedAt: Date.now() };
   },
+  async fetchUsage(credential) {
+    const response = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
+    return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
+  },
 };
 
 export const codexProvider: Provider = {
@@ -355,6 +399,11 @@ export const codexProvider: Provider = {
     const payload: Record<string, unknown> = { model: template.model, input: [{ role: 'user', content: 'x' }], stream: true, store: false };
     if (template.system) payload.instructions = template.system;
     return { url: `https://chatgpt.com/backend-api${template.path}`, headers, body: JSON.stringify(payload) };
+  },
+  async fetchUsage(credential) {
+    const response = await fetch('https://chatgpt.com/backend-api/wham/usage', { headers: { authorization: `Bearer ${credential.accessToken}`, 'chatgpt-account-id': credential.accountId }, signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error(`Codex usage failed (${response.status})`);
+    return codexUsageQuota(await response.json() as Parameters<typeof codexUsageQuota>[0]);
   },
 };
 
