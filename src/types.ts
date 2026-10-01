@@ -15,6 +15,10 @@ export interface OAuthCredential {
   refreshToken: string | null;
   expiresAt: number | null;
   accountId: string;
+  // Codex only: the ChatGPT user behind the token. accountId names the
+  // workspace and is what the chatgpt-account-id header needs, but every member
+  // of a Business/Team workspace shares it, so it cannot tell two members apart.
+  userId?: string;
 }
 
 export interface TeamAIConfig {

@@ -42,7 +42,20 @@ export async function importAuth(provider: ProviderId, from?: string): Promise<A
   const accountId = typeof tokens.account_id === 'string' ? tokens.account_id : stringAt(auth, 'chatgpt_account_id') || stringAt(auth, 'account_id');
   if (!accountId) throw new Error('Codex account_id is missing');
   const exp = decodeJwt(tokens.access_token).exp;
-  return [{ label: stringAt(idClaims, 'email') || accountId, credential: { accessToken: tokens.access_token, refreshToken: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : null, expiresAt: typeof exp === 'number' ? exp * 1000 : null, accountId } }];
+  const userId = codexUserId(tokens.access_token, typeof tokens.id_token === 'string' ? tokens.id_token : undefined);
+  return [{ label: stringAt(idClaims, 'email') || accountId, credential: { accessToken: tokens.access_token, refreshToken: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : null, expiresAt: typeof exp === 'number' ? exp * 1000 : null, accountId, ...(userId ? { userId } : {}) } }];
+}
+
+// The ChatGPT user a Codex token belongs to. The access token is read first so
+// a credential stored without its id_token resolves to the same value later.
+export function codexUserId(accessToken: string, idToken?: string): string | null {
+  for (const token of [accessToken, idToken]) {
+    if (!token) continue;
+    const claims = decodeJwt(token); const auth = claims['https://api.openai.com/auth'];
+    const id = stringAt(auth, 'chatgpt_user_id') || stringAt(auth, 'user_id') || stringAt(claims, 'sub');
+    if (id) return id;
+  }
+  return null;
 }
 
 async function claudeProfile(accessToken: string): Promise<{ id: string; label: string }> {
