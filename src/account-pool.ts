@@ -510,7 +510,7 @@ export class AccountPool {
       if (live) {
         // Config fields may have been edited (label, enabled, priority); runtime
         // fields and the possibly-refreshed credential stay as they are.
-        next.push(Object.assign(live, { label: account.label, enabled: account.enabled, priority: account.priority }));
+        next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority }));
       } else {
         added++;
         next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });

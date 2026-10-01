@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { codexUserId } from './auth.js';
 import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
 
 export function dataDir(): string {
@@ -31,12 +32,36 @@ export async function saveCredentials(value: Record<string, OAuthCredential>): P
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
 
+// The key a stored account is known by: the account id, plus the user for a
+// Codex workspace that several members share.
+export function accountKey(credential: OAuthCredential): string {
+  return credential.userId ? `${credential.accountId}:${credential.userId}` : credential.accountId;
+}
+
+// Codex accounts stored before the user joined the key are keyed by the
+// workspace alone. Such a record is adopted only when it holds the same user;
+// another member of that workspace gets a row of their own instead of
+// overwriting it.
+function legacyAccount(config: TeamAIConfig, credentials: Record<string, OAuthCredential>, provider: ProviderId, label: string, credential: OAuthCredential): StoredAccount | undefined {
+  if (!credential.userId) return undefined;
+  return config.accounts.find((a) => {
+    if (a.provider !== provider || a.id !== credential.accountId) return false;
+    // The held token's user decides when it has one; the label (an email) is
+    // only a fallback, since two members without an email claim share a label.
+    const held = credentials[a.credentialId]; const heldUser = held ? codexUserId(held.accessToken) : null;
+    return heldUser ? heldUser === credential.userId : a.label === label;
+  });
+}
+
 export async function upsertAccount(provider: ProviderId, label: string, credential: OAuthCredential): Promise<StoredAccount> {
   const config = await loadConfig();
   const credentials = await loadCredentials();
-  const existing = config.accounts.find((a) => a.provider === provider && a.id === credential.accountId);
-  const credentialId = existing?.credentialId || `${provider}:${credential.accountId}`;
-  const account: StoredAccount = existing || { id: credential.accountId, provider, label, enabled: true, priority: null, credentialId, createdAt: new Date().toISOString() };
+  const key = accountKey(credential);
+  const existing = config.accounts.find((a) => a.provider === provider && a.id === key) || legacyAccount(config, credentials, provider, label, credential);
+  const credentialId = existing?.credentialId || `${provider}:${key}`;
+  const account: StoredAccount = existing || { id: key, provider, label, enabled: true, priority: null, credentialId, createdAt: new Date().toISOString() };
+  // A migrated record keeps its credentialId, so its saved usage history stays attached.
+  account.id = key;
   account.label = label || account.label;
   if (!existing) config.accounts.push(account);
   credentials[credentialId] = credential;

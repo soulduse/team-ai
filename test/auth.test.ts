@@ -17,3 +17,16 @@ test('imports all OAuth accounts from TeamClaude config without modifying it', a
   assert.equal(imported.length, 2); assert.equal(imported[1]?.credential.accountId, '22222222-2222-2222-2222-222222222222');
   assert.equal(await readFile(path, 'utf8'), fixture);
 });
+
+test('imports the Codex user alongside the workspace so workspace members stay distinct', async () => {
+  const jwt = (claims: Record<string, unknown>): string => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+  const dir = await mkdtemp(join(tmpdir(), 'teamai-import-')); const path = join(dir, 'auth.json');
+  await writeFile(path, JSON.stringify({ tokens: {
+    access_token: jwt({ exp: 100, 'https://api.openai.com/auth': { chatgpt_account_id: 'workspace', chatgpt_user_id: 'user-b' } }),
+    id_token: jwt({ email: 'b@corp.com', sub: 'auth0|b', 'https://api.openai.com/auth': { chatgpt_account_id: 'workspace' } }),
+    refresh_token: 'refresh', account_id: 'workspace',
+  } }));
+  const [imported] = await importAuth('codex', path);
+  assert.equal(imported?.label, 'b@corp.com');
+  assert.equal(imported?.credential.accountId, 'workspace'); assert.equal(imported?.credential.userId, 'user-b');
+});
