@@ -83,3 +83,54 @@ test('a state save superseded by a later one is not written', async () => {
   assert.deepEqual((await readdir(root)).filter((f) => f.endsWith('.tmp')), []);
   delete process.env.TEAMAI_HOME;
 });
+
+// The profile endpoint as Claude serves it: which organization each token belongs to.
+function profileServer(orgOf: Record<string, string>): () => void {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const token = String(new Headers(init?.headers).get('authorization')).replace('Bearer ', '');
+    const org = orgOf[token];
+    return org ? new Response(JSON.stringify({ account: { uuid: 'person', email: 'me@corp.com' }, organization: { uuid: org } })) : new Response('{}', { status: 401 });
+  }) as typeof fetch;
+  return () => { globalThis.fetch = original; };
+}
+
+test('keeps a personal plan and a Team seat under one email as separate Claude accounts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'teamai-storage-')); process.env.TEAMAI_HOME = root;
+  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-orgs`);
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'personal', refreshToken: 'rp', expiresAt: 1, accountId: 'person', organizationId: 'org-personal' });
+  await storage.upsertAccount('claude', 'me@corp.com (Team)', { accessToken: 'team', refreshToken: 'rt', expiresAt: 1, accountId: 'person', organizationId: 'org-team' });
+  const config = await storage.loadConfig(); const credentials = await storage.loadCredentials();
+  assert.deepEqual(config.accounts.map((a: { id: string }) => a.id), ['person:org-personal', 'person:org-team']);
+  assert.deepEqual(config.accounts.map((a: { credentialId: string }) => credentials[a.credentialId].refreshToken), ['rp', 'rt']);
+  delete process.env.TEAMAI_HOME;
+});
+
+test('upgrades a person-keyed Claude record for the same organization and leaves it for another', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'teamai-storage-')); process.env.TEAMAI_HOME = root;
+  t.after(profileServer({ held: 'org-team' }));
+  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-legacy`);
+  // A record written before the organization joined the key: id is the bare account uuid.
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'held', refreshToken: 'r-team', expiresAt: 1, accountId: 'person' });
+  const legacyId = (await storage.loadConfig()).accounts[0].credentialId;
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'personal', refreshToken: 'r-personal', expiresAt: 1, accountId: 'person', organizationId: 'org-personal' });
+  let config = await storage.loadConfig();
+  assert.equal(config.accounts.length, 2); assert.equal((await storage.loadCredentials())[legacyId].refreshToken, 'r-team');
+  await storage.upsertAccount('claude', 'me@corp.com (Team)', { accessToken: 'team2', refreshToken: 'r-team2', expiresAt: 2, accountId: 'person', organizationId: 'org-team' });
+  config = await storage.loadConfig();
+  assert.equal(config.accounts.length, 2);
+  const upgraded = config.accounts.find((a: { credentialId: string }) => a.credentialId === legacyId);
+  assert.equal(upgraded.id, 'person:org-team'); assert.equal(upgraded.label, 'me@corp.com (Team)');
+  delete process.env.TEAMAI_HOME;
+});
+
+test('does not overwrite a person-keyed Claude record whose token can no longer name its organization', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'teamai-storage-')); process.env.TEAMAI_HOME = root;
+  t.after(profileServer({}));
+  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-unknown`);
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'expired', refreshToken: 'r-old', expiresAt: 1, accountId: 'person' });
+  const legacyId = (await storage.loadConfig()).accounts[0].credentialId;
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'new', refreshToken: 'r-new', expiresAt: 1, accountId: 'person', organizationId: 'org-personal' });
+  assert.equal((await storage.loadConfig()).accounts.length, 2); assert.equal((await storage.loadCredentials())[legacyId].refreshToken, 'r-old');
+  delete process.env.TEAMAI_HOME;
+});

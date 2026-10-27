@@ -30,3 +30,17 @@ test('imports the Codex user alongside the workspace so workspace members stay d
   assert.equal(imported?.label, 'b@corp.com');
   assert.equal(imported?.credential.accountId, 'workspace'); assert.equal(imported?.credential.userId, 'user-b');
 });
+
+test('a Claude credential carries its organization, and a Team seat says so in its label', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'teamai-claude-import-'));
+  const original = globalThis.fetch; t.after(() => { globalThis.fetch = original; });
+  let type = 'claude_team';
+  globalThis.fetch = (async () => new Response(JSON.stringify({ account: { uuid: 'person', email: 'me@corp.com' }, organization: { uuid: `org-${type}`, organization_type: type } }))) as typeof fetch;
+  const file = join(dir, 'credentials.json');
+  await writeFile(file, JSON.stringify({ claudeAiOauth: { accessToken: 'token', refreshToken: 'refresh', expiresAt: 1 } }));
+  const [team] = await importAuth('claude', file);
+  assert.equal(team?.label, 'me@corp.com (Team)'); assert.equal(team?.credential.organizationId, 'org-claude_team'); assert.equal(team?.credential.accountId, 'person');
+  type = 'claude_max';
+  const [personal] = await importAuth('claude', file);
+  assert.equal(personal?.label, 'me@corp.com'); assert.equal(personal?.credential.organizationId, 'org-claude_max');
+});
