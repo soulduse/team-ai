@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFrame, displayOrder } from '../src/frame.js';
+import { buildFrame, claudeTier, displayOrder } from '../src/frame.js';
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
 function account(provider: 'claude' | 'codex', label: string, priority: number | null = null): StoredAccount {
@@ -68,4 +68,17 @@ test('buildFrame pads to the terminal height when given one and not otherwise', 
   const view = { width: 100, selectedId: null, mode: 'normal' as const, message: '', sortByHeadroom: true };
   assert.equal(buildFrame(config, usage({}), { ...view, height: 40 }).length, 40);
   assert.ok(buildFrame(config, usage({}), view).length < 40);
+});
+
+test('claudeTier: Max multipliers, the Ultra rename, and unknown tiers shown as reported', () => {
+  const p = (rateLimitTier: string | null, orgType: string | null = null, hasClaudeMax: boolean | null = null) => ({ status: 'active', createdAt: null, rateLimitTier, orgType, hasClaudeMax, hasClaudePro: null, fetchedAt: 0 });
+  assert.equal(claudeTier(null), 'OAuth');
+  assert.equal(claudeTier(p('default_claude_max_20x', 'claude_max')), 'Max 20x');
+  assert.equal(claudeTier(p('default_claude_max_5x', 'claude_max')), 'Max 5x');
+  assert.equal(claudeTier(p('default_claude_ultra', 'claude_max', true)), 'Ultra');
+  assert.equal(claudeTier(p(null, 'claude_ultra')), 'Ultra');
+  assert.equal(claudeTier(p(null, 'claude_max', true)), 'Max');
+  assert.equal(claudeTier(p('default_claude_premium', 'claude_premium')), 'premium');
+  assert.equal(claudeTier(p(null, 'claude_premium')), 'premium');
+  assert.equal(claudeTier(p(null, null)), 'OAuth');
 });

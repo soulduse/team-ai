@@ -52,9 +52,20 @@ function codexPlan(profile: SubscriptionProfile | null | undefined): string {
   // plan name is the whole of what can be known.
   return names[raw.toLowerCase()] || raw;
 }
-function tier(profile: SubscriptionProfile | null | undefined): string {
-  if (!profile) return 'OAuth'; const match = /(\d+x)$/i.exec(profile.rateLimitTier || '');
-  if (match) return `Max ${match[1]}`; if (profile.hasClaudeMax || profile.orgType === 'claude_max') return 'Max'; if (profile.hasClaudePro || profile.orgType === 'claude_pro') return 'Pro'; return 'OAuth';
+// Anthropic is renaming Max 20x to Ultra; the profile API may then report an
+// 'ultra' tier or org type instead of 'default_claude_max_20x'. A tier this
+// function does not recognise is shown as reported rather than as 'OAuth', so
+// a renamed plan never reads like an account with no subscription at all.
+export function claudeTier(profile: SubscriptionProfile | null | undefined): string {
+  if (!profile) return 'OAuth';
+  const raw = profile.rateLimitTier || ''; const org = profile.orgType || '';
+  if (/ultra/i.test(raw) || /ultra/i.test(org)) return 'Ultra';
+  const match = /(\d+x)$/i.exec(raw);
+  if (match) return `Max ${match[1]}`;
+  if (profile.hasClaudeMax || org === 'claude_max') return 'Max';
+  if (profile.hasClaudePro || org === 'claude_pro') return 'Pro';
+  const reported = raw.replace(/^default_claude_/i, '') || org.replace(/^claude_/i, '');
+  return reported || 'OAuth';
 }
 function renewal(profile: SubscriptionProfile | null | undefined): string {
   if (!profile?.createdAt || !healthy(profile)) return '—'; const created = new Date(profile.createdAt); if (!Number.isFinite(created.getTime())) return '—';
@@ -165,7 +176,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
     for (const account of group) {
       const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
-      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
+      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : codexPlan(profile);
       const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
