@@ -199,6 +199,7 @@ before speculating; a port conflict is the common cause.
 | `src/redact.ts` | Account-address masking (partial / full / none), applied to data before drawing |
 | `src/png.ts` | Dependency-free PNG encoder (own CRC-32: `zlib.crc32` is Node 22.2+) and SGR-to-pixel renderer |
 | `src/font.ts` | Generated 9×18 bitmap glyphs; regenerate with `scripts/gen-font.py` (needs Pillow, build-time only) |
+| `src/font-cjk.ts` | Generated GNU Unifont glyphs (SIL OFL 1.1) for Hangul, kana, kanji, fullwidth forms and wider symbol blocks, deflated; regenerate with `scripts/gen-font-cjk.py` (needs Pillow and Unifont, build-time only) |
 | `src/routes.ts` | Model-route parsing and matching (`parseRoutes` is the one validator) |
 | `src/route-config.ts` | Saving routes (validate, write only `routes`, reload a running server); `teamai route` |
 | `src/route-control.ts` | Control-port `POST /routes/reload` |

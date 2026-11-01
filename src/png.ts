@@ -2,8 +2,9 @@
 // glyphs come from the bitmap in font.ts; the colors follow the SGR codes the
 // frame already carries, so the image is the terminal rendering, not a
 // re-drawing of the data.
-import { deflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 import { charWidth } from './columns.js';
+import { NARROW_BITMAP, NARROW_GLYPHS, UNIFONT_HEIGHT, WIDE_BITMAP, WIDE_GLYPHS } from './font-cjk.js';
 import { BITMAP, CELL_HEIGHT, CELL_WIDTH, GLYPHS } from './font.js';
 
 // CRC-32 as PNG specifies it (reflected, polynomial 0xEDB88320). zlib.crc32
@@ -86,6 +87,29 @@ function parseLine(line: string): Cell[] {
 const bitmap = Buffer.from(BITMAP, 'base64');
 const glyphIndex = new Map<string, number>(); for (const [index, glyph] of [...GLYPHS].entries()) glyphIndex.set(glyph, index);
 
+// The Menlo set covers ASCII and the frame's own symbols. Everything else —
+// Hangul, kana, kanji, fullwidth forms, the wider symbol blocks — comes from
+// the Unifont set in src/font-cjk.ts, inflated once on first need: 8x16 for a
+// one-cell character, 16x16 for a two-cell one, centred in its cells.
+interface Unifont { rows: Buffer; index: Map<string, number> }
+let unifont: { narrow: Unifont; wide: Unifont } | undefined;
+const load = (glyphs: string, data: string): Unifont => {
+  const index = new Map<string, number>(); for (const [i, glyph] of [...glyphs].entries()) index.set(glyph, i);
+  return { rows: inflateSync(Buffer.from(data, 'base64')), index };
+};
+const unifontSet = (): { narrow: Unifont; wide: Unifont } => (unifont ??= { narrow: load(NARROW_GLYPHS, NARROW_BITMAP), wide: load(WIDE_GLYPHS, WIDE_BITMAP) });
+
+// Where a character's pixels come from, or null when only the fallback box
+// can be drawn. A two-cell character takes a wide glyph (or a narrow one
+// centred); a one-cell character never takes a wide glyph that would spill
+// into its neighbour.
+export function glyphSource(glyph: string): 'menlo' | 'unifont' | null {
+  if (glyphIndex.has(glyph)) return 'menlo';
+  const set = unifontSet();
+  if (set.narrow.index.has(glyph) || (charWidth(glyph) === 2 && set.wide.index.has(glyph))) return 'unifont';
+  return null;
+}
+
 export function renderFrame(lines: string[], padding = 12): Buffer {
   const rows = lines.map(parseLine); const cols = Math.max(1, ...rows.map((row) => row.length));
   const width = cols * CELL_WIDTH + padding * 2; const height = rows.length * CELL_HEIGHT + padding * 2;
@@ -96,6 +120,16 @@ export function renderFrame(lines: string[], padding = 12): Buffer {
     const x0 = padding + c * CELL_WIDTH; const y0 = padding + r * CELL_HEIGHT;
     if (cell.bg) for (let y = 0; y < CELL_HEIGHT; y++) for (let x = 0; x < CELL_WIDTH; x++) put(x0 + x, y0 + y, cell.bg);
     const index = glyphIndex.get(cell.glyph);
+    if (index === undefined && glyphSource(cell.glyph) === 'unifont') {
+      const set = unifontSet(); const span = charWidth(cell.glyph) * CELL_WIDTH;
+      const wide = span > CELL_WIDTH && set.wide.index.has(cell.glyph); const font = wide ? set.wide : set.narrow;
+      const at = font.index.get(cell.glyph)!; const dx = Math.floor((span - (wide ? 16 : 8)) / 2); const dy = Math.floor((CELL_HEIGHT - UNIFONT_HEIGHT) / 2);
+      for (let y = 0; y < UNIFONT_HEIGHT; y++) {
+        const bits = font.rows.readUInt16BE((at * UNIFONT_HEIGHT + y) * 2);
+        for (let x = 0; x < 16; x++) if (bits & (1 << (15 - x))) put(x0 + dx + x, y0 + dy + y, cell.fg);
+      }
+      return;
+    }
     if (index === undefined) {
       // A glyph the bitmap does not carry: draw a hollow box so the gap is
       // visible in the image rather than silently blank.
