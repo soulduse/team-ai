@@ -37,25 +37,40 @@ function holding() {
 // second rename lands first. With one shared temporary name the second save
 // either finds the first's temp file in its way or moves it into place, and
 // one of the two saves fails.
-test('concurrent atomic saves use independent temporary files even when the second rename completes first', { timeout: 5_000 }, async (t) => {
-  const root = await home(t);
-  const rename = fs.rename; const sources: string[] = [];
-  let secondDone: Promise<unknown> = Promise.resolve();
-  t.mock.method(fs, 'rename', async (...args: Parameters<typeof rename>) => {
-    sources.push(String(args[0]));
-    if (sources.length === 1) await secondDone;
-    await rename(...args);
+for (const secondWritesFirst of [false, true]) {
+  test(`concurrent atomic saves use independent temporary files even when the second rename completes first${secondWritesFirst ? ' and writes first' : ''}`, { timeout: 5_000 }, async (t) => {
+    const root = await home(t);
+    const rename = fs.rename; const sources: string[] = [];
+    const secondAtRename = holding();
+    let firstSource = '';
+    const write = fs.writeFile;
+    t.mock.method(fs, 'writeFile', async (...args: Parameters<typeof write>) => {
+      if (String(args[1]).includes('"message": "first"')) {
+        firstSource = String(args[0]);
+        if (secondWritesFirst) await secondAtRename.hold();
+      }
+      return write(...args);
+    });
+    let secondDone: Promise<unknown> = Promise.resolve();
+    t.mock.method(fs, 'rename', async (...args: Parameters<typeof rename>) => {
+      sources.push(String(args[0]));
+      // Identify the save by its payload's temp path, not by arrival order.
+      if (String(args[0]) === firstSource) await secondDone;
+      else secondAtRename.release();
+      await rename(...args);
+    });
+    syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    const first = saveState({ version: 1, accounts: {}, events: [{ at: 1, message: 'first' }] });
+    const second = saveState({ version: 1, accounts: {}, events: [{ at: 2, message: 'second' }] }); secondDone = second.catch(() => {});
+    const results = await Promise.allSettled([first, second]);
+    assert.deepEqual(results.map((r) => r.status === 'rejected' ? `rejected: ${(r.reason as Error).message}` : r.status), ['fulfilled', 'fulfilled']);
+    assert.equal(new Set(sources).size, 2);
+    const state = JSON.parse(await readFile(paths().state, 'utf8')) as { events: Array<{ message: string }> };
+    assert.equal(state.events[0]!.message, 'first', 'the save whose rename landed last is the one on disk');
+    assert.deepEqual(await readdir(root), [basename(paths().state)]);
   });
-  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  const first = saveState({ version: 1, accounts: {}, events: [{ at: 1, message: 'first' }] });
-  const second = saveState({ version: 1, accounts: {}, events: [{ at: 2, message: 'second' }] }); secondDone = second.catch(() => {});
-  const results = await Promise.allSettled([first, second]);
-  assert.deepEqual(results.map((r) => r.status === 'rejected' ? `rejected: ${(r.reason as Error).message}` : r.status), ['fulfilled', 'fulfilled']);
-  assert.equal(new Set(sources).size, 2);
-  const state = JSON.parse(await readFile(paths().state, 'utf8')) as { events: Array<{ message: string }> };
-  assert.equal(state.events[0]!.message, 'first', 'the save whose rename landed last is the one on disk');
-  assert.deepEqual(await readdir(root), [basename(paths().state)]);
-});
+
+}
 
 test('a credential change from another process waits for the one in progress instead of overwriting it', async (t) => {
   const root = await home(t);

@@ -16,7 +16,7 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 8; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 };
 
-function fakeClock(start: number) {
+function fakeClock(start: number, settle: () => Promise<void> = flush) {
   type FakeTimer = { at: number; fn: () => void; unref(): void };
   let now = start;
   const timers = new Set<FakeTimer>();
@@ -38,10 +38,10 @@ function fakeClock(start: number) {
         now = due.at;
         timers.delete(due);
         due.fn();
-        await flush();
+        await settle();
       }
       now = target;
-      await flush();
+      await settle();
     },
     pending: () => timers.size,
   };
@@ -70,151 +70,175 @@ const makeCredential = (id: string, expiresAt: number | null): OAuthCredential =
   accountId: id,
 });
 
-test('idle Claude and Codex accounts refresh periodically with per-account jitter and renew expiring tokens first', async () => {
-  const start = 1_700_000_000_000;
-  const clock = fakeClock(start);
-  const claudeReads: Array<{ token: string; at: number }> = [];
-  const codexReads: Array<{ accountId: string; token: string; at: number }> = [];
-  const refreshedTokens: string[] = [];
+for (const delayed of [false, true]) {
+  test(`idle Claude and Codex accounts refresh periodically with per-account jitter and renew expiring tokens first${delayed ? ' with delayed HTTP' : ''}`, async (t) => {
+    const start = 1_700_000_000_000;
+    const probes = new Set<Promise<boolean>>();
+    // Keep virtual time at the current deadline until real HTTP and quota application finish.
+    const clock = fakeClock(start, async () => {
+      await Promise.all(probes);
+      await flush();
+    });
+    const claudeReads: Array<{ token: string; at: number }> = [];
+    const codexReads: Array<{ accountId: string; token: string; at: number }> = [];
+    const refreshedTokens: string[] = [];
 
-  let claudeStep = 0;
-  let codexStep = 0;
+    let claudeStep = 0;
+    let codexStep = 0;
 
-  const fakeClaudeUpstream = createServer((req, res) => {
-    req.resume();
-    if (req.url === '/api/oauth/usage') {
-      const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
-      claudeReads.push({ token, at: clock.now() });
-      claudeStep++;
-      const reset5h = new Date(clock.now() + 5 * 3_600_000).toISOString();
-      const reset7d = new Date(clock.now() + 7 * 86_400_000).toISOString();
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        five_hour: { utilization: claudeStep * 15, resets_at: reset5h },
-        seven_day: { utilization: claudeStep * 10, resets_at: reset7d },
-      }));
-      return;
-    }
-    res.writeHead(404).end();
-  });
-
-  const fakeCodexUpstream = createServer((req, res) => {
-    req.resume();
-    if (req.url === '/wham/usage') {
-      const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
-      const accountId = String(req.headers['chatgpt-account-id'] ?? '');
-      codexReads.push({ accountId, token, at: clock.now() });
-      codexStep++;
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        rate_limit: {
-          primary_window: { used_percent: codexStep * 20, reset_at: Math.floor((clock.now() + 5 * 3_600_000) / 1000), limit_window_seconds: 18_000 },
-          secondary_window: { used_percent: codexStep * 12, reset_at: Math.floor((clock.now() + 7 * 86_400_000) / 1000), limit_window_seconds: 604_800 },
-        },
-      }));
-      return;
-    }
-    res.writeHead(404).end();
-  });
-
-  await new Promise<void>((r) => fakeClaudeUpstream.listen(0, '127.0.0.1', r));
-  await new Promise<void>((r) => fakeCodexUpstream.listen(0, '127.0.0.1', r));
-  const claudeAddr = fakeClaudeUpstream.address();
-  const codexAddr = fakeCodexUpstream.address();
-  assert(claudeAddr && typeof claudeAddr !== 'string');
-  assert(codexAddr && typeof codexAddr !== 'string');
-
-  const customClaude: Provider = {
-    ...claudeProvider,
-    upstreamBase: `http://127.0.0.1:${claudeAddr.port}`,
-    refresh: async (cred) => {
-      refreshedTokens.push(cred.accountId);
-      return { ...cred, accessToken: `renewed-${cred.accountId}`, expiresAt: clock.now() + 3_600_000 };
-    },
-  };
-  const customCodex: Provider = {
-    ...codexProvider,
-    upstreamBase: `http://127.0.0.1:${codexAddr.port}`,
-    refresh: async (cred) => {
-      refreshedTokens.push(cred.accountId);
-      return { ...cred, accessToken: `renewed-${cred.accountId}`, expiresAt: clock.now() + 3_600_000 };
-    },
-  };
-
-  try {
-    const state: PersistedState = {
-      version: 1,
-      accounts: {
-        'claude:idle-c': { usage: 0.05, resetsAt: start + 3_600_000, measuredAt: start, windows: { '5h': { usage: 0.05, resetsAt: start + 3_600_000 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
-        'codex:idle-x': { usage: 0.08, resetsAt: start + 3_600_000, measuredAt: start, windows: { primary: { usage: 0.08, resetsAt: start + 3_600_000, minutes: 300 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
-      },
+    const waitForHttp = async () => {
+      if (delayed) for (let i = 0; i < 32; i++) await new Promise<void>((resolve) => setImmediate(resolve));
     };
-    // Claude token is expiring within 2 minutes (< 5m margin), Codex token is valid for an hour.
-    const claudePool = new AccountPool(
-      customClaude,
-      [storedAccount('claude', 'idle-c', true, 2)],
-      { 'claude:idle-c': makeCredential('idle-c', start + 2 * 60_000) },
-      state,
-    );
-    const codexPool = new AccountPool(
-      customCodex,
-      [storedAccount('codex', 'idle-x', true, 2)],
-      { 'codex:idle-x': makeCredential('idle-x', start + 60 * 60_000) },
-      state,
-    );
-
-    const intervalMs = 5 * 60_000;
-    const jitterMaxMs = 20_000;
-    const refresher = new UsageRefresher([claudePool, codexPool], {
-      intervalMs,
-      jitterMaxMs,
-      nowFn: clock.now,
-      setTimeoutFn: clock.setTimeout,
-      clearTimeoutFn: clock.clearTimeout,
+    const fakeClaudeUpstream = createServer(async (req, res) => {
+      req.resume();
+      await waitForHttp();
+      if (req.url === '/api/oauth/usage') {
+        const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+        claudeReads.push({ token, at: clock.now() });
+        claudeStep++;
+        const reset5h = new Date(clock.now() + 5 * 3_600_000).toISOString();
+        const reset7d = new Date(clock.now() + 7 * 86_400_000).toISOString();
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          five_hour: { utilization: claudeStep * 15, resets_at: reset5h },
+          seven_day: { utilization: claudeStep * 10, resets_at: reset7d },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
     });
 
-    refresher.start();
-    await flush();
-    // Readings were fresh at `start`, so neither fires before `intervalMs`.
-    assert.equal(claudeReads.length, 0);
-    assert.equal(codexReads.length, 0);
+    const fakeCodexUpstream = createServer(async (req, res) => {
+      req.resume();
+      await waitForHttp();
+      if (req.url === '/wham/usage') {
+        const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+        const accountId = String(req.headers['chatgpt-account-id'] ?? '');
+        codexReads.push({ accountId, token, at: clock.now() });
+        codexStep++;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          rate_limit: {
+            primary_window: { used_percent: codexStep * 20, reset_at: Math.floor((clock.now() + 5 * 3_600_000) / 1000), limit_window_seconds: 18_000 },
+            secondary_window: { used_percent: codexStep * 12, reset_at: Math.floor((clock.now() + 7 * 86_400_000) / 1000), limit_window_seconds: 604_800 },
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
 
-    await clock.advance(intervalMs - 1);
-    assert.equal(claudeReads.length, 0);
-    assert.equal(codexReads.length, 0);
+    await new Promise<void>((r) => fakeClaudeUpstream.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => fakeCodexUpstream.listen(0, '127.0.0.1', r));
+    const claudeAddr = fakeClaudeUpstream.address();
+    const codexAddr = fakeCodexUpstream.address();
+    assert(claudeAddr && typeof claudeAddr !== 'string');
+    assert(codexAddr && typeof codexAddr !== 'string');
 
-    // Advance past interval + max jitter: both idle accounts are probed once, at jittered timestamps.
-    await clock.advance(jitterMaxMs + 1);
-    assert.equal(claudeReads.length, 1);
-    assert.equal(codexReads.length, 1);
-    assert.deepEqual(refreshedTokens, ['idle-c'], 'expiring Claude token was refreshed before calling /api/oauth/usage');
-    assert.equal(claudeReads[0]!.token, 'renewed-idle-c');
-    assert.equal(codexReads[0]!.token, 'tok-idle-x');
+    const customClaude: Provider = {
+      ...claudeProvider,
+      upstreamBase: `http://127.0.0.1:${claudeAddr.port}`,
+      refresh: async (cred) => {
+        refreshedTokens.push(cred.accountId);
+        return { ...cred, accessToken: `renewed-${cred.accountId}`, expiresAt: clock.now() + 3_600_000 };
+      },
+    };
+    const customCodex: Provider = {
+      ...codexProvider,
+      upstreamBase: `http://127.0.0.1:${codexAddr.port}`,
+      refresh: async (cred) => {
+        refreshedTokens.push(cred.accountId);
+        return { ...cred, accessToken: `renewed-${cred.accountId}`, expiresAt: clock.now() + 3_600_000 };
+      },
+    };
 
-    const expectedClaudeJitter0 = defaultUsageJitter('claude:idle-c', 0, jitterMaxMs);
-    const expectedCodexJitter0 = defaultUsageJitter('codex:idle-x', 0, jitterMaxMs);
-    assert.equal(claudeReads[0]!.at, start + intervalMs + expectedClaudeJitter0);
-    assert.equal(codexReads[0]!.at, start + intervalMs + expectedCodexJitter0);
-    assert.notEqual(claudeReads[0]!.at, codexReads[0]!.at, 'per-account jitter separates probe times');
+    try {
+      const state: PersistedState = {
+        version: 1,
+        accounts: {
+          'claude:idle-c': { usage: 0.05, resetsAt: start + 3_600_000, measuredAt: start, windows: { '5h': { usage: 0.05, resetsAt: start + 3_600_000 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
+          'codex:idle-x': { usage: 0.08, resetsAt: start + 3_600_000, measuredAt: start, windows: { primary: { usage: 0.08, resetsAt: start + 3_600_000, minutes: 300 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
+        },
+      };
+      // Claude token is expiring within 2 minutes (< 5m margin), Codex token is valid for an hour.
+      const claudePool = new AccountPool(
+        customClaude,
+        [storedAccount('claude', 'idle-c', true, 2)],
+        { 'claude:idle-c': makeCredential('idle-c', start + 2 * 60_000) },
+        state,
+      );
+      const codexPool = new AccountPool(
+        customCodex,
+        [storedAccount('codex', 'idle-x', true, 2)],
+        { 'codex:idle-x': makeCredential('idle-x', start + 60 * 60_000) },
+        state,
+      );
 
-    assert.equal(claudePool.accounts[0]!.windows['5h']?.usage, 0.15);
-    assert.equal(claudePool.accounts[0]!.windows['7d']?.usage, 0.10);
-    assert.equal(codexPool.accounts[0]!.windows.primary?.usage, 0.20);
-    assert.equal(codexPool.accounts[0]!.windows.secondary?.usage, 0.12);
+      for (const pool of [claudePool, codexPool]) {
+        const refresh = pool.refreshUsageAccount.bind(pool);
+        t.mock.method(pool, 'refreshUsageAccount', (...args: Parameters<typeof refresh>) => {
+          const probe = refresh(...args);
+          probes.add(probe);
+          void probe.then(() => probes.delete(probe), () => probes.delete(probe));
+          return probe;
+        });
+      }
 
-    // Advance another full cycle: both idle accounts refresh a second time.
-    await clock.advance(intervalMs + jitterMaxMs);
-    assert.equal(claudeReads.length, 2);
-    assert.equal(codexReads.length, 2);
-    assert.equal(claudePool.accounts[0]!.windows['5h']?.usage, 0.30);
-    assert.equal(codexPool.accounts[0]!.windows.primary?.usage, 0.40);
+      const intervalMs = 5 * 60_000;
+      const jitterMaxMs = 20_000;
+      const refresher = new UsageRefresher([claudePool, codexPool], {
+        intervalMs,
+        jitterMaxMs,
+        nowFn: clock.now,
+        setTimeoutFn: clock.setTimeout,
+        clearTimeoutFn: clock.clearTimeout,
+      });
 
-    refresher.stop();
-  } finally {
-    fakeClaudeUpstream.close();
-    fakeCodexUpstream.close();
-  }
-});
+      t.after(() => refresher.stop());
+      refresher.start();
+      await flush();
+      // Readings were fresh at `start`, so neither fires before `intervalMs`.
+      assert.equal(claudeReads.length, 0);
+      assert.equal(codexReads.length, 0);
+
+      await clock.advance(intervalMs - 1);
+      assert.equal(claudeReads.length, 0);
+      assert.equal(codexReads.length, 0);
+
+      // Advance past interval + max jitter: both idle accounts are probed once, at jittered timestamps.
+      await clock.advance(jitterMaxMs + 1);
+      assert.equal(claudeReads.length, 1);
+      assert.equal(codexReads.length, 1);
+      assert.deepEqual(refreshedTokens, ['idle-c'], 'expiring Claude token was refreshed before calling /api/oauth/usage');
+      assert.equal(claudeReads[0]!.token, 'renewed-idle-c');
+      assert.equal(codexReads[0]!.token, 'tok-idle-x');
+
+      const expectedClaudeJitter0 = defaultUsageJitter('claude:idle-c', 0, jitterMaxMs);
+      const expectedCodexJitter0 = defaultUsageJitter('codex:idle-x', 0, jitterMaxMs);
+      assert.equal(claudeReads[0]!.at, start + intervalMs + expectedClaudeJitter0);
+      assert.equal(codexReads[0]!.at, start + intervalMs + expectedCodexJitter0);
+      assert.notEqual(claudeReads[0]!.at, codexReads[0]!.at, 'per-account jitter separates probe times');
+
+      assert.equal(claudePool.accounts[0]!.windows['5h']?.usage, 0.15);
+      assert.equal(claudePool.accounts[0]!.windows['7d']?.usage, 0.10);
+      assert.equal(codexPool.accounts[0]!.windows.primary?.usage, 0.20);
+      assert.equal(codexPool.accounts[0]!.windows.secondary?.usage, 0.12);
+
+      // Advance another full cycle: both idle accounts refresh a second time.
+      await clock.advance(intervalMs + jitterMaxMs);
+      assert.equal(claudeReads.length, 2);
+      assert.equal(codexReads.length, 2);
+      assert.equal(claudePool.accounts[0]!.windows['5h']?.usage, 0.30);
+      assert.equal(codexPool.accounts[0]!.windows.primary?.usage, 0.40);
+
+      refresher.stop();
+    } finally {
+      fakeClaudeUpstream.close();
+      fakeCodexUpstream.close();
+    }
+  });
+
+}
 
 test('disabled and retired accounts are excluded from periodic usage probing and direct refreshUsage', async () => {
   const start = 1_700_000_000_000;
