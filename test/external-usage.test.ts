@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage } from 'node:http';
 import test from 'node:test';
-import { collectAntigravity, collectGrok, collectOpencodeGo, ExternalUsageMonitor, externalUsageSettings, parseAgyUsage, parseGrokBilling, parseOpencodeUsage, type ExternalUsage } from '../src/external-usage.js';
+import { collectAntigravity, collectCommandCode, collectGrok, collectOpencodeGo, ExternalUsageMonitor, externalUsageSettings, parseAgyUsage, parseCommandCodeUsage, parseGrokBilling, parseOpencodeUsage, type ExternalUsage } from '../src/external-usage.js';
 import { buildFrame } from '../src/frame.js';
 import { redactSnapshot } from '../src/redact.js';
 import type { PersistedState, TeamAIConfig } from '../src/types.js';
 
 const KEY = 'sk-opencode-SECRET-123'; const GROK_KEY = 'xai-SECRET-token-456';
+const CMD_KEY = 'cmd-secret-token-XYZ-987';
 
 test('agy /usage rows are grouped by name and turned from remaining into used', () => {
   const tsv = [
@@ -144,4 +145,184 @@ test('capture redaction masks or drops the other agents\' identities', () => {
   const state: PersistedState = { version: 1, accounts: {}, external: { grok: { provider: 'grok', status: 'ok', identity: 'SuperGrok jane.doe@gmail.com', groups: [], note: null, measuredAt: 1, lastOkAt: 1 } } };
   assert.equal(JSON.stringify(redactSnapshot(config, state, 'partial').state).includes('jane.doe@gmail.com'), false);
   assert.equal(redactSnapshot(config, state, 'full').state.external?.grok?.identity, null);
+});
+
+const CMD_CREDITS_FIXTURE = {
+  credits: {
+    belowThreshold: false,
+    creditThreshold: 0,
+    monthlyCredits: 69.995,
+    purchasedCredits: 0,
+    freeCredits: 0,
+  },
+  windowLimits: {
+    limited: true,
+    exceeded: null,
+    fiveHour: {
+      used: 0.005,
+      cap: 14,
+      exceeded: false,
+      resetAt: 1793542930268,
+    },
+    weekly: {
+      used: 0.005,
+      cap: 35,
+      exceeded: false,
+      resetAt: 1794129730268,
+    },
+  },
+};
+const CMD_SUB_FIXTURE = {
+  success: true,
+  data: {
+    id: 'sub-fake-123',
+    status: 'active',
+    planId: 'individual-goat',
+    currentPeriodEnd: '2026-12-01T09:15:36.000Z',
+  },
+};
+const CMD_WHOAMI_FIXTURE = {
+  success: true,
+  user: {
+    id: 'u-cmd-1',
+    name: 'Jane Doe',
+    email: 'jane.doe@example.com',
+    userName: 'janedoe',
+  },
+  org: null,
+};
+
+test('parseCommandCodeUsage parses rolling, weekly and monthly limits; unexpected shape throws', () => {
+  const parsed = parseCommandCodeUsage(CMD_CREDITS_FIXTURE, CMD_SUB_FIXTURE);
+  assert.equal(parsed.plan, 'GOAT');
+  assert.deepEqual(parsed.groups[0]!.name, 'Command Code');
+  assert.deepEqual(parsed.groups[0]!.windows.map((w) => [w.label, w.minutes, w.usedPercent]), [
+    ['5h', 300, 0],
+    ['wk', 10_080, 0],
+    ['30d', 43_200, 0],
+  ]);
+  assert.equal(parsed.groups[0]!.windows[0]!.resetsAt, 1793542930268);
+  assert.equal(parsed.groups[0]!.windows[2]!.resetsAt, Date.parse('2026-12-01T09:15:36.000Z'));
+  assert.throws(() => parseCommandCodeUsage({}), /unexpected/);
+  assert.throws(() => parseCommandCodeUsage({ windowLimits: { limited: false } }), /unexpected/);
+});
+
+test('Command Code: normal response, signed out, CLI missing, malformed shape, token leak prevention', async () => {
+  let status = 200;
+  let creditsBody = JSON.stringify(CMD_CREDITS_FIXTURE);
+  const http = await fakeHttp((req) => {
+    if (status !== 200) return { status, body: status === 502 ? '<html>gateway</html>' : '{}', type: status === 502 ? 'text/html' : 'application/json' };
+    if (req.url === '/alpha/billing/credits') return { status: 200, body: creditsBody };
+    if (req.url === '/alpha/billing/subscriptions') return { status: 200, body: JSON.stringify(CMD_SUB_FIXTURE) };
+    if (req.url === '/alpha/whoami?limits=1') return { status: 200, body: JSON.stringify(CMD_WHOAMI_FIXTURE) };
+    return { status: 404, body: '{}' };
+  });
+
+  const authFile = { '/h/.commandcode/auth.json': JSON.stringify({ apiKey: CMD_KEY, userName: 'janedoe' }) };
+  const deps = { home: '/h', readFile: files(authFile), commandCodeUrl: http.base, env: {} };
+
+  try {
+    // 1. CLI 없음: auth.json 없고 execFile 이 ENOENT -> null
+    const noCli = await collectCommandCode({ home: '/h', readFile: files({}), commandCodeUrl: http.base, env: {}, execFile: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); } });
+    assert.equal(noCli, null, 'CLI not installed: returns null (no box)');
+
+    // 2. 로그인 안 됨: auth.json 은 없으나 CLI 는 설치되어 있는 경우
+    const cliInstalledNoAuth = await collectCommandCode({ home: '/h', readFile: files({}), commandCodeUrl: http.base, env: {}, execFile: async () => 'command-code v1.88.2\n' });
+    assert.equal(cliInstalledNoAuth?.status, 'signed-out');
+    assert.equal(cliInstalledNoAuth?.note, 'not signed in — run command-code login');
+
+    // 2-1. 로그인 안 됨: auth.json 이 빈 객체
+    const emptyAuth = await collectCommandCode({ home: '/h', readFile: files({ '/h/.commandcode/auth.json': '{}' }), commandCodeUrl: http.base, env: {} });
+    assert.equal(emptyAuth?.status, 'signed-out');
+
+    // 3. 정상 응답
+    const ok = await collectCommandCode(deps);
+    assert.equal(ok?.status, 'ok');
+    assert.equal(ok?.identity, 'GOAT ja•••••e@ex•••••.com');
+    assert.equal(ok?.groups[0]?.windows.length, 3);
+    assert.equal(http.seen[0]!.headers.authorization, `Bearer ${CMD_KEY}`);
+
+    // 3-1. 환경 변수로 키 제공
+    const envOk = await collectCommandCode({ home: '/h', readFile: files({}), commandCodeUrl: http.base, env: { COMMAND_CODE_API_KEY: CMD_KEY } });
+    assert.equal(envOk?.status, 'ok');
+
+    // 4. 상태 코드 및 이상한 모양 매핑
+    const outcomes: ExternalUsage[] = [];
+    for (const s of [401, 403, 502]) {
+      status = s;
+      outcomes.push((await collectCommandCode(deps))!);
+    }
+    status = 200;
+    creditsBody = JSON.stringify({ invalid: 'shape' });
+    outcomes.push((await collectCommandCode(deps))!);
+
+    assert.deepEqual(outcomes.map((o) => [o.status, o.note]), [
+      ['signed-out', 'API key rejected — run command-code login'],
+      ['unavailable', 'no Command Code subscription'],
+      ['error', 'HTTP 502'],
+      ['error', 'unexpected response'],
+    ]);
+
+    // 5. 토큰 비노출: 어떤 출력이나 오류 객체에도 시크릿 토큰 및 원본 이메일 미포함
+    const all = [ok, envOk, ...outcomes];
+    assert.equal(JSON.stringify(all).includes(CMD_KEY), false);
+    assert.equal(JSON.stringify(all).includes('jane.doe@example.com'), false);
+  } finally {
+    http.close();
+  }
+});
+
+test('dashboard renders commandCode box with identity and gauges', () => {
+  const now = Date.now();
+  const state: PersistedState = {
+    version: 1,
+    accounts: {},
+    external: {
+      commandCode: {
+        provider: 'commandCode',
+        status: 'ok',
+        identity: 'GOAT ja•••••e@ex•••••.com',
+        groups: [{
+          name: 'Command Code',
+          windows: [
+            { label: '5h', minutes: 300, usedPercent: 0, resetsAt: now + 3_600_000 },
+            { label: 'wk', minutes: 10_080, usedPercent: 0, resetsAt: now + 7 * 86_400_000 },
+            { label: '30d', minutes: 43_200, usedPercent: 0, resetsAt: now + 30 * 86_400_000 },
+          ],
+        }],
+        note: null,
+        measuredAt: now,
+        lastOkAt: now,
+      },
+    },
+  };
+  const lines = buildFrame(config, state, view).map(plain);
+  assert.ok(lines.some((l) => l.startsWith('┌─ Command Code ')));
+  assert.ok(lines.some((l) => l.includes('Command Code GOAT ja•••••e@ex•••••.com')));
+});
+
+test('ExternalUsageMonitor default wiring reads commandCode via collectCommandCode', async () => {
+  const http = await fakeHttp((req) => {
+    if (req.url === '/alpha/billing/credits') return { status: 200, body: JSON.stringify(CMD_CREDITS_FIXTURE) };
+    if (req.url === '/alpha/billing/subscriptions') return { status: 200, body: JSON.stringify(CMD_SUB_FIXTURE) };
+    if (req.url === '/alpha/whoami?limits=1') return { status: 200, body: JSON.stringify(CMD_WHOAMI_FIXTURE) };
+    return { status: 404, body: '{}' };
+  });
+
+  const authFile = { '/h/.commandcode/auth.json': JSON.stringify({ apiKey: CMD_KEY, userName: 'janedoe' }) };
+  const deps = { home: '/h', readFile: files(authFile), commandCodeUrl: http.base, env: {} };
+  const settings = {
+    ...externalUsageSettings({}),
+    providers: { antigravity: false, opencodeGo: false, grok: false, commandCode: true },
+  };
+
+  try {
+    const monitor = new ExternalUsageMonitor(settings, deps);
+    await monitor.tick(true);
+    assert.equal(monitor.usage.commandCode?.status, 'ok');
+    assert.equal(monitor.usage.commandCode?.identity, 'GOAT ja•••••e@ex•••••.com');
+    assert.equal(monitor.usage.commandCode?.groups[0]?.windows.length, 3);
+  } finally {
+    http.close();
+  }
 });

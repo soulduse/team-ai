@@ -209,7 +209,7 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
 // 'weekly' when it sends no length) is kept as is for saved state.
 const externalLabel = (window: ExternalWindow): string => windowLabel(window.minutes, /^(wk|weekly)$/i.test(window.label) ? '7d' : window.label);
 
-const EXTERNAL_TITLES: Record<ExternalProvider, string> = { antigravity: 'Antigravity (agy)', opencodeGo: 'OpenCode Go', grok: 'Grok' };
+const EXTERNAL_TITLES: Record<ExternalProvider, string> = { antigravity: 'Antigravity (agy)', opencodeGo: 'OpenCode Go', grok: 'Grok', commandCode: 'Command Code' };
 
 // One provider's box: a row per usage group, its windows as the same gauges
 // the accounts use (same colour steps, so the screen reads one way), or a

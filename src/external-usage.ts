@@ -1,5 +1,5 @@
 // Usage of other coding agents installed on this machine — Antigravity (agy),
-// OpenCode Go and Grok — shown on the dashboard next to the relayed accounts.
+// OpenCode Go, Grok and Command Code — shown on the dashboard next to the relayed accounts.
 // Display only: none of them is relayed, and nothing here touches the proxy.
 //
 // Their credentials belong to those apps. They are read, used in memory for
@@ -7,7 +7,7 @@
 // not into an error message, not onto a child process's command line. The one
 // exception is Grok's sign-in: when it is about to expire it is refreshed with
 // its own refresh token, the way the grok CLI does (src/grok-refresh.ts). All
-// three sources are undocumented, so an answer of an unexpected shape becomes
+// four sources are undocumented, so an answer of an unexpected shape becomes
 // an 'error' row rather than a guess.
 import { execFile as execFileCallback } from 'node:child_process';
 import { readFile as readFileAsync } from 'node:fs/promises';
@@ -17,8 +17,8 @@ import { grokExpiring, grokRefreshable, refreshGrokSignIn, type GrokRefreshDeps 
 import { maskLabel } from './redact.js';
 import type { TeamAIConfig } from './types.js';
 
-export type ExternalProvider = 'antigravity' | 'opencodeGo' | 'grok';
-export const EXTERNAL_PROVIDERS: readonly ExternalProvider[] = ['antigravity', 'opencodeGo', 'grok'];
+export type ExternalProvider = 'antigravity' | 'opencodeGo' | 'grok' | 'commandCode';
+export const EXTERNAL_PROVIDERS: readonly ExternalProvider[] = ['antigravity', 'opencodeGo', 'grok', 'commandCode'];
 
 export interface ExternalWindow { label: string; minutes: number | null; usedPercent: number | null; resetsAt: number | null }
 export interface ExternalUsage {
@@ -33,14 +33,19 @@ export interface ExternalUsage {
   lastOkAt: number | null;
 }
 
-export interface ExternalUsageSettings { enabled: boolean; providers: Record<ExternalProvider, boolean>; refreshMs: number; source: 'direct' | 'orca' }
+export interface ExternalUsageSettings { enabled: boolean; providers: Partial<Record<ExternalProvider, boolean>>; refreshMs: number; source: 'direct' | 'orca' }
 
 export function externalUsageSettings(config: Partial<TeamAIConfig>): ExternalUsageSettings {
   const raw = config.externalUsage ?? {};
   const refresh = raw.refreshMs;
   return {
     enabled: raw.enabled !== false,
-    providers: { antigravity: raw.providers?.antigravity !== false, opencodeGo: raw.providers?.opencodeGo !== false, grok: raw.providers?.grok !== false },
+    providers: {
+      antigravity: raw.providers?.antigravity !== false,
+      opencodeGo: raw.providers?.opencodeGo !== false,
+      grok: raw.providers?.grok !== false,
+      commandCode: raw.providers?.commandCode !== false,
+    },
     refreshMs: typeof refresh === 'number' && Number.isFinite(refresh) ? Math.max(30_000, refresh) : 15 * 60_000,
     source: raw.source === 'orca' ? 'orca' : 'direct',
   };
@@ -102,13 +107,64 @@ export function parseGrokBilling(data: unknown): { groups: ExternalUsage['groups
   return { groups: [{ name: 'Grok', windows }], tier: typeof tier === 'string' && tier ? tier.slice(0, 24) : null };
 }
 
+const COMMAND_CODE_PLANS: Record<string, { name: string; monthlyCredits: number }> = {
+  'individual-go': { name: 'Go', monthlyCredits: 15 },
+  'individual-go-v1': { name: 'Go', monthlyCredits: 15 },
+  'individual-goat': { name: 'GOAT', monthlyCredits: 70 },
+  'individual-pro': { name: 'Pro', monthlyCredits: 20 },
+  'individual-pro-v1': { name: 'Pro', monthlyCredits: 20 },
+  'individual-provider': { name: 'Provider', monthlyCredits: 0 },
+  'individual-max': { name: 'Max', monthlyCredits: 100 },
+  'individual-ultra': { name: 'Ultra', monthlyCredits: 250 },
+  'teams-pro': { name: 'Teams Pro', monthlyCredits: 40 },
+};
+
+// Command Code's usage: five-hour and weekly window limits, plus monthly plan
+// credits when an active subscription provides them.
+export function parseCommandCodeUsage(creditsData: unknown, subData?: unknown): { groups: ExternalUsage['groups']; plan: string | null } {
+  const windowLimits = field(creditsData, 'windowLimits');
+  const fiveHour = field(windowLimits, 'fiveHour');
+  const weekly = field(windowLimits, 'weekly');
+  const windows: ExternalWindow[] = [];
+
+  const parseWindow = (w: unknown, label: string, minutes: number): ExternalWindow | null => {
+    if (!w || typeof w !== 'object') return null;
+    const cap = field(w, 'cap'); const used = field(w, 'used');
+    if (typeof cap !== 'number' || typeof used !== 'number' || cap <= 0) return null;
+    const usedPercent = percent(Math.round((used / cap) * 100));
+    return { label, minutes, usedPercent, resetsAt: instant(field(w, 'resetAt')) };
+  };
+
+  const w5h = parseWindow(fiveHour, '5h', MINUTES['5h']!);
+  if (w5h) windows.push(w5h);
+  const wWeekly = parseWindow(weekly, 'wk', MINUTES.wk!);
+  if (wWeekly) windows.push(wWeekly);
+
+  const planId = field(subData, 'data', 'planId');
+  const planInfo = typeof planId === 'string' && planId ? (COMMAND_CODE_PLANS[planId.toLowerCase()] ?? null) : null;
+  const planName = planInfo?.name ?? (typeof planId === 'string' && planId ? planId.replace(/^(individual|teams)-/i, '').toUpperCase().slice(0, 24) : null);
+
+  const currentPeriodEnd = instant(field(subData, 'data', 'currentPeriodEnd'));
+  const monthlyCreditsRemaining = field(creditsData, 'credits', 'monthlyCredits');
+  if (planInfo && planInfo.monthlyCredits > 0 && typeof monthlyCreditsRemaining === 'number' && Number.isFinite(monthlyCreditsRemaining)) {
+    const pool = planInfo.monthlyCredits;
+    const used = Math.max(0, pool - monthlyCreditsRemaining);
+    windows.push({ label: '30d', minutes: MINUTES['30d']!, usedPercent: percent(Math.round((used / pool) * 100)), resetsAt: currentPeriodEnd });
+  }
+
+  if (!windows.length) throw new Error('unexpected response');
+  const order = (w: ExternalWindow) => ['5h', 'wk', '30d'].indexOf(w.label) + 1 || 9;
+  return { groups: [{ name: 'Command Code', windows: windows.sort((a, b) => order(a) - order(b)) }], plan: planName };
+}
+
 // What Orca already gathered, for someone who runs it: one command fills all
 // three instead of three separate reads.
 export function parseOrcaRateLimits(data: unknown): Partial<Record<ExternalProvider, ExternalUsage['groups'] | null>> {
   const limits = field(data, 'result', 'rateLimits'); if (!limits || typeof limits !== 'object') throw new Error('unexpected response');
   const out: Partial<Record<ExternalProvider, ExternalUsage['groups'] | null>> = {};
   for (const provider of EXTERNAL_PROVIDERS) {
-    const entry = field(limits, provider); if (!entry || typeof entry !== 'object') continue;
+    const entry = field(limits, provider) ?? (provider === 'commandCode' ? field(limits, 'command-code') : undefined);
+    if (!entry || typeof entry !== 'object') continue;
     const windows = (['session', 'weekly', 'monthly'] as const).flatMap((key) => {
       const window = field(entry, key); if (!window || typeof window !== 'object') return [];
       const minutes = field(window, 'windowMinutes');
@@ -120,7 +176,7 @@ export function parseOrcaRateLimits(data: unknown): Partial<Record<ExternalProvi
   return out;
 }
 
-export const NAMES: Record<ExternalProvider, string> = { antigravity: 'Antigravity', opencodeGo: 'OpenCode Go', grok: 'Grok' };
+export const NAMES: Record<ExternalProvider, string> = { antigravity: 'Antigravity', opencodeGo: 'OpenCode Go', grok: 'Grok', commandCode: 'Command Code' };
 
 export interface CollectDeps {
   execFile?: (command: string, args: string[], options: { timeout: number }) => Promise<string>;
@@ -131,6 +187,7 @@ export interface CollectDeps {
   now?: () => number;
   opencodeUrl?: string;
   grokRefresh?: Omit<GrokRefreshDeps, 'fetch' | 'now'>;
+  commandCodeUrl?: string;
 }
 
 const defaultExec = (command: string, args: string[], options: { timeout: number }): Promise<string> => new Promise((resolve, reject) => {
@@ -217,6 +274,71 @@ export async function collectGrok(deps: CollectDeps = {}): Promise<ExternalUsage
   } catch { return result('grok', 'error', 'unexpected response', { identity: who }, now); }
 }
 
+export async function collectCommandCode(deps: CollectDeps = {}): Promise<ExternalUsage | null> {
+  const env = deps.env ?? process.env; const home = deps.home ?? homedir(); const now = deps.now?.() ?? Date.now();
+  const authPath = join(env.COMMAND_CODE_HOME || env.COMMANDCODE_HOME || join(home, '.commandcode'), 'auth.json');
+  const auth = await readJson(deps, authPath);
+  const storedKey = field(auth, 'apiKey');
+  const envKey = env.COMMAND_CODE_API_KEY || env.COMMANDCODE_API_KEY;
+  const key = typeof storedKey === 'string' && storedKey ? storedKey : (typeof envKey === 'string' && envKey ? envKey : null);
+
+  if (!key) {
+    if (auth !== undefined) return result('commandCode', 'signed-out', 'not signed in — run command-code login', {}, now);
+    const exec = deps.execFile ?? defaultExec;
+    try {
+      await exec('command-code', ['--version'], { timeout: 5000 });
+      return result('commandCode', 'signed-out', 'not signed in — run command-code login', {}, now);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      return result('commandCode', 'signed-out', 'not signed in — run command-code login', {}, now);
+    }
+  }
+
+  const base = (deps.commandCodeUrl || env.COMMANDCODE_API_URL || env.COMMAND_CODE_API_URL || 'https://api.commandcode.ai').replace(/\/+$/, '');
+  const headers: Record<string, string> = { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json' };
+  const fetchFn = deps.fetch ?? fetch;
+
+  let creditsRes: Response;
+  let subRes: Response | null = null;
+  let whoRes: Response | null = null;
+  try {
+    const [cRes, sRes, wRes] = await Promise.all([
+      fetchFn(`${base}/alpha/billing/credits`, { headers, signal: AbortSignal.timeout(15_000) }),
+      fetchFn(`${base}/alpha/billing/subscriptions`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null),
+      fetchFn(`${base}/alpha/whoami?limits=1`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null),
+    ]);
+    creditsRes = cRes; subRes = sRes; whoRes = wRes;
+  } catch {
+    return result('commandCode', 'error', 'usage request failed', {}, now);
+  }
+
+  if (creditsRes.status === 401) return result('commandCode', 'signed-out', 'API key rejected — run command-code login', {}, now);
+  if (creditsRes.status === 403) return result('commandCode', 'unavailable', 'no Command Code subscription', {}, now);
+  if (!creditsRes.ok) return result('commandCode', 'error', `HTTP ${creditsRes.status}`, {}, now);
+
+  let userEmail: string | null = null;
+  let userName: string | null = typeof field(auth, 'userName') === 'string' ? (field(auth, 'userName') as string) : null;
+  if (whoRes && whoRes.ok) {
+    const whoData = await whoRes.json().catch(() => null);
+    const email = field(whoData, 'user', 'email');
+    if (typeof email === 'string' && email) userEmail = email;
+    const name = field(whoData, 'user', 'userName');
+    if (typeof name === 'string' && name) userName = name;
+  }
+  const who = userEmail ? maskLabel(userEmail, 'partial', 0) : (userName ? maskLabel(userName, 'partial', 0) : null);
+
+  const subData = subRes && subRes.ok ? await subRes.json().catch(() => null) : null;
+
+  try {
+    const creditsData = await creditsRes.json();
+    const parsed = parseCommandCodeUsage(creditsData, subData);
+    const identity = [parsed.plan, who].filter(Boolean).join(' ') || null;
+    return result('commandCode', 'ok', null, { identity, groups: parsed.groups }, now);
+  } catch {
+    return result('commandCode', 'error', 'unexpected response', { identity: who }, now);
+  }
+}
+
 export async function collectFromOrca(deps: CollectDeps = {}): Promise<Partial<Record<ExternalProvider, ExternalUsage>>> {
   const now = deps.now?.() ?? Date.now(); const exec = deps.execFile ?? defaultExec;
   let parsed: ReturnType<typeof parseOrcaRateLimits>;
@@ -226,6 +348,13 @@ export async function collectFromOrca(deps: CollectDeps = {}): Promise<Partial<R
   }
   return Object.fromEntries(Object.entries(parsed).map(([p, groups]) => [p, groups ? result(p as ExternalProvider, 'ok', null, { identity: 'orca', groups }, now) : result(p as ExternalProvider, 'unavailable', 'usage unavailable', { identity: 'orca' }, now)]));
 }
+
+const DEFAULT_COLLECTORS: Record<ExternalProvider, (deps: CollectDeps) => Promise<ExternalUsage | null>> = {
+  antigravity: collectAntigravity,
+  opencodeGo: collectOpencodeGo,
+  grok: collectGrok,
+  commandCode: collectCommandCode,
+};
 
 // Keeps the latest reading per provider and decides when to read again: on
 // the refresh interval after a success, and after a failure on a back-off of
@@ -240,7 +369,7 @@ export class ExternalUsageMonitor {
   private running = new Set<string>();
   private orcaDueAt = 0;
 
-  constructor(readonly settings: ExternalUsageSettings, private readonly deps: CollectDeps = {}, private readonly collectors: Record<ExternalProvider, (deps: CollectDeps) => Promise<ExternalUsage | null>> = { antigravity: collectAntigravity, opencodeGo: collectOpencodeGo, grok: collectGrok }) {}
+  constructor(readonly settings: ExternalUsageSettings, private readonly deps: CollectDeps = {}, private readonly collectors: Partial<Record<ExternalProvider, (deps: CollectDeps) => Promise<ExternalUsage | null>>> = DEFAULT_COLLECTORS) {}
 
   // Read whatever is due (or everything, when forced). Resolves to whether
   // anything shown changed. Never throws.
@@ -261,7 +390,8 @@ export class ExternalUsageMonitor {
       this.running.add(provider);
       try {
         let reading: ExternalUsage | null;
-        try { reading = await this.collectors[provider](this.deps); } catch { reading = result(provider, 'error', 'read failed', {}, now); }
+        const collector = this.collectors[provider] ?? DEFAULT_COLLECTORS[provider];
+        try { reading = await collector(this.deps); } catch { reading = result(provider, 'error', 'read failed', {}, now); }
         this.store(provider, reading, now); return true;
       } finally { this.running.delete(provider); }
     }));
