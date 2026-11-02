@@ -170,8 +170,11 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       const seen = new Set(codexSpans.map((spans) => spans[index]).filter(Boolean));
       return seen.size === 1 ? `${[...seen][0]} limit` : index === 0 ? 'usage limit' : 'second limit';
     };
+    // Claude folded the 5-hour session limit into the weekly one; keep the
+    // session column only while some account still reports a live 5h window.
+    const claudeSession = group.some((account) => activeWindow(state.accounts[account.credentialId]?.windows?.['5h']));
     const usageTitles = provider === 'claude'
-      ? `${slot('5h session')}${slot('7d overall')}${slot('7d Fable')}`
+      ? `${claudeSession ? slot('5h session') : ''}${slot('7d overall')}${slot('7d Fable')}`
       : Array.from({ length: codexWindowCount }, (_, index) => slot(spanAt(index))).join('');
     lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
     for (const account of group) {
@@ -180,7 +183,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-        lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}`);
+        lines.push(`${head} ${claudeSession ? `${bar(session?.usage, session?.resetsAt, barWidth)} ` : ''}${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}`);
       } else {
         const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
         const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');

@@ -493,3 +493,11 @@ test('a token endpoint the network cannot reach is retried, not reported as need
   assert.match(a.error!, /unreachable \(ETIMEDOUT\); retrying/);
   assert.equal(pool.acquire('s'), null, 'an expired token still cannot serve while the network is down');
 });
+
+test('sweepExpired drops an inert window with no reset, keeping measured ones', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, { version: 1, accounts: {} });
+  const now = Date.now();
+  pool.accounts[0]!.windows = { '5h': { usage: 0, resetsAt: null }, '7d': { usage: 0.4, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 0, resetsAt: now + 86_400_000 } };
+  pool.sweepExpired();
+  assert.deepEqual(Object.keys(pool.accounts[0]!.windows).sort(), ['7d', '7d_oi']);
+});

@@ -56,7 +56,12 @@ test('buildFrame draws both sections, the column titles and the footer within th
   assert.ok(lines.every((line) => [...line].length <= 120), 'no line wider than the frame');
   assert.ok(lines.some((line) => line.includes('Claude accounts (1)')));
   assert.ok(lines.some((line) => line.includes('Codex accounts (1)')));
-  assert.ok(lines.some((line) => line.includes('5h session') && line.includes('7d overall') && line.includes('7d Fable')));
+  assert.ok(lines.some((line) => line.includes('7d overall') && line.includes('7d Fable')));
+  // Claude folded the 5-hour limit into the weekly one: no live 5h window, no column.
+  assert.ok(!lines.some((line) => line.includes('5h session')));
+  state.accounts['cred-c@example.com']!.windows!['5h'] = { usage: 0.2, resetsAt: Date.now() + 3_600_000 };
+  const withSession = buildFrame(config, state, { width: 120, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).map(plain);
+  assert.ok(withSession.some((line) => line.includes('5h session') && line.includes('7d overall')), 'a live 5h window brings the column back');
   assert.ok(lines.some((line) => line.startsWith('> c@example.com')), 'cursor on the selected row');
   const footer = lines.at(-1)!;
   assert.match(footer, /p capture/); assert.match(footer, /c quota-sort/); assert.match(footer, /hello$/);

@@ -189,13 +189,13 @@ export class AccountPool {
     for (const account of live) {
       const fable = AccountPool.fableWindow(account);
       if (wantsFable && AccountPool.fableSpent(account, 1)) { fableSpent++; if (fable?.resetsAt) resets.push({ at: fable.resetsAt, label: `${account.label} Fable weekly` }); continue; }
-      if (account.usage !== null && account.usage >= 1) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} session` }); continue; }
+      if (account.usage !== null && account.usage >= 1) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} usage limit` }); continue; }
       if (account.cooldownUntil && account.cooldownUntil > now) { coolingDown++; resets.push({ at: account.cooldownUntil, label: `${account.label} cooldown` }); }
     }
     const next = resets.filter((r) => r.at > now).sort((a, b) => a.at - b.at)[0];
     const parts: string[] = [];
     if (fableSpent) parts.push(`${fableSpent} spent the Fable weekly budget`);
-    if (overLimit) parts.push(`${overLimit} used up the session window`);
+    if (overLimit) parts.push(`${overLimit} used up the usage limit`);
     if (coolingDown) parts.push(`${coolingDown} cooling down after an upstream rejection`);
     const what = wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
     const detail = parts.length ? ` (${live.length} accounts: ${parts.join(', ')})` : ` (${live.length} accounts)`;
@@ -416,7 +416,12 @@ export class AccountPool {
     for (const account of this.accounts) {
       let changed = false;
       for (const [name, window] of Object.entries(account.windows)) {
-        if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; changed = true; }
+        if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; changed = true; continue; }
+        // A window with no reset, no recorded span and nothing used is a
+        // leftover from a limit upstream no longer reports (Claude dropped the
+        // 5-hour session window in favour of the weekly one); without a reset
+        // nothing would ever clear it, so it would sit in the dashboard forever.
+        if (!window.minutes && window.resetsAt == null && !((window.usage ?? 0) > 0)) { delete account.windows[name]; changed = true; }
       }
       if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; changed = true; }
       if (changed) { this.warmupTries.delete(account.credentialId); swept++; }

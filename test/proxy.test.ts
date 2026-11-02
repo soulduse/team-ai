@@ -104,7 +104,7 @@ test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy
     assert.equal(res.status, 429);
     assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
     const body = JSON.parse(await res.text()) as { error: string };
-    assert.match(body.error, /1 used up the session window/);
+    assert.match(body.error, /1 used up the usage limit/);
   } finally { proxy.close(); }
 });
 
@@ -134,8 +134,8 @@ test('acquire-null 429 for a Fable request names the spent Fable budgets, the ea
     assert.equal(res.headers.get('x-teamai-429-reason'), 'quota_exhausted');
     assert.equal(res.headers.get('retry-after'), '540');
     const body = JSON.parse(await res.text()) as { error: string };
-    assert.match(body.error, /^No Claude account can serve Fable right now \(2 accounts: 1 spent the Fable weekly budget, 1 used up the session window\)\./);
-    assert.match(body.error, /Earliest reset in 9m: b@example\.com session\./);
+    assert.match(body.error, /^No Claude account can serve Fable right now \(2 accounts: 1 spent the Fable weekly budget, 1 used up the usage limit\)\./);
+    assert.match(body.error, /Earliest reset in 9m: b@example\.com usage limit\./);
     assert.match(body.error, /Other models are still served/);
     assert.ok(events.some((e) => /429 quota_exhausted \(fable\), next reset 9m/.test(e)), `activity log should record the 429: ${events.join(' | ')}`);
     // A non-Fable request is still routed to account a: it reaches the (unreachable)

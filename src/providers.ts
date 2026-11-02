@@ -157,8 +157,12 @@ export const claudeProvider: Provider = {
     const names = new Set<string>();
     for (const [key] of headers) { const match = /^anthropic-ratelimit-unified-(5h|7d(?:_[a-z0-9]+)?)-(?:utilization|reset)$/i.exec(key); if (match?.[1]) names.add(match[1]); }
     for (const name of names) {
-      const usage = Number(headers.get(`anthropic-ratelimit-unified-${name}-utilization`));
+      // Number(null) is 0, so an absent utilization header would otherwise
+      // read as a measured empty window rather than as no measurement.
+      const raw = headers.get(`anthropic-ratelimit-unified-${name}-utilization`);
+      const usage = raw === null || raw.trim() === '' ? NaN : Number(raw);
       const reset = timestamp(headers.get(`anthropic-ratelimit-unified-${name}-reset`));
+      if (!Number.isFinite(usage) && reset === null) continue;
       windows[name] = { usage: Number.isFinite(usage) ? usage : null, resetsAt: reset };
     }
     const routing = ['5h', '7d'].map((name) => windows[name]).filter((x) => x?.usage !== null && x?.usage !== undefined).sort((a, b) => (b?.usage ?? 0) - (a?.usage ?? 0))[0];

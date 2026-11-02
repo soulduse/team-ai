@@ -236,3 +236,10 @@ test('reads Codex /wham/usage windows with their length in minutes', () => {
   assert.equal(quota?.routingUsage, 0.21);
   assert.equal(codexUsageQuota({ rate_limit: null }), null);
 });
+
+test('claude readQuota ignores a window whose headers carry no figure', () => {
+  const quota = claudeProvider.readQuota(new Headers({ 'anthropic-ratelimit-unified-5h-status': 'allowed', 'anthropic-ratelimit-unified-5h-reset': '', 'anthropic-ratelimit-unified-7d-utilization': '0.4', 'anthropic-ratelimit-unified-7d-reset': String(Math.floor(Date.now() / 1000) + 86_400) }));
+  assert.equal(quota?.windows['5h'], undefined);
+  assert.equal(quota?.windows['7d']?.usage, 0.4);
+  assert.equal(quota?.routingUsage, 0.4);
+});
