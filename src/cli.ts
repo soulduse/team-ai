@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { relayedCodexConfig } from './codex-config.js';
+import { launchCommand } from './launch.js';
 import { isRedactLevel } from './redact.js';
 import { releaseServerFile, runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, paths, saveConfig, upsertAccount } from './storage.js';
@@ -117,7 +118,7 @@ async function ensureServer(): Promise<void> {
 async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
   const config = await loadConfig(); if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer();
   if (id === 'claude') {
-    const result = spawnSync('claude', clientArgs, { stdio: 'inherit', env: { ...process.env, ANTHROPIC_BASE_URL: `http://${config.proxy.host}:${config.proxy.claudePort}`, ANTHROPIC_AUTH_TOKEN: config.proxy.clientToken } });
+    const launch = launchCommand('claude', clientArgs); const result = spawnSync(launch.file, launch.args, { stdio: 'inherit', windowsVerbatimArguments: launch.windowsVerbatimArguments, env: { ...process.env, ANTHROPIC_BASE_URL: `http://${config.proxy.host}:${config.proxy.claudePort}`, ANTHROPIC_AUTH_TOKEN: config.proxy.clientToken } });
     if (result.error) throw result.error; process.exitCode = result.status ?? 1; return;
   }
   const shadow = join(process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai'), 'codex-home'); await mkdir(shadow, { recursive: true, mode: 0o700 });
@@ -148,7 +149,7 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
     // silence is upstream's and only the client's patience can cover it.
     '-c', 'model_providers.teamai.stream_idle_timeout_ms=1800000',
   ];
-  const result = spawnSync('codex', [...overrides, ...clientArgs], { stdio: 'inherit', env: { ...process.env, CODEX_HOME: shadow, TEAMAI_PROXY_TOKEN: config.proxy.clientToken } });
+  const launch = launchCommand('codex', [...overrides, ...clientArgs]); const result = spawnSync(launch.file, launch.args, { stdio: 'inherit', windowsVerbatimArguments: launch.windowsVerbatimArguments, env: { ...process.env, CODEX_HOME: shadow, TEAMAI_PROXY_TOKEN: config.proxy.clientToken } });
   if (result.error) throw result.error; process.exitCode = result.status ?? 1;
 }
 

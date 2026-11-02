@@ -2,9 +2,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
-import { homedir, platform, tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
+import { openInBrowser } from './desktop.js';
+import { launchCommand } from './launch.js';
 import type { OAuthCredential, ProviderId } from './types.js';
 
 function expand(path: string): string { return path.startsWith('~/') ? join(homedir(), path.slice(2)) : resolve(path); }
@@ -76,7 +78,7 @@ export async function loginClaude(): Promise<{ label: string; credential: OAuthC
   const redirect = `http://localhost:${address.port}/callback`;
   const url = new URL('https://claude.ai/oauth/authorize');
   for (const [k, v] of Object.entries({ code: 'true', client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', response_type: 'code', redirect_uri: redirect, scope: 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload', code_challenge: challenge, code_challenge_method: 'S256', state })) url.searchParams.set(k, v);
-  openBrowser(url.toString()); console.error(`Open this URL if the browser did not open:\n${url}`);
+  openInBrowser(url.toString()); console.error(`Open this URL if the browser did not open:\n${url}`);
   let authorizationCode: string; try { authorizationCode = await code; } finally { server.close(); }
   const response = await fetch('https://platform.claude.com/v1/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: authorizationCode, state, grant_type: 'authorization_code', client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', redirect_uri: redirect, code_verifier: verifier }) });
   if (!response.ok) throw new Error(`Claude token exchange failed (${response.status})`);
@@ -87,10 +89,9 @@ export async function loginClaude(): Promise<{ label: string; credential: OAuthC
 export async function loginCodex(): Promise<{ label: string; credential: OAuthCredential }> {
   const home = await mkdtemp(join(tmpdir(), 'teamai-codex-login-'));
   try {
-    const exit = await new Promise<number>((resolveExit, reject) => { const child = spawn('codex', ['login'], { stdio: 'inherit', env: { ...process.env, CODEX_HOME: home } }); child.once('error', reject); child.once('exit', (code) => resolveExit(code ?? 1)); });
+    const exit = await new Promise<number>((resolveExit, reject) => { const launch = launchCommand('codex', ['login']); const child = spawn(launch.file, launch.args, { stdio: 'inherit', windowsVerbatimArguments: launch.windowsVerbatimArguments, env: { ...process.env, CODEX_HOME: home } }); child.once('error', reject); child.once('exit', (code) => resolveExit(code ?? 1)); });
     if (exit !== 0) throw new Error(`codex login exited with ${exit}`);
     return (await importAuth('codex', join(home, 'auth.json')))[0]!;
   } finally { await rm(home, { recursive: true, force: true }); }
 }
 
-function openBrowser(url: string): void { const command = platform() === 'darwin' ? 'open' : 'xdg-open'; spawn(command, [url], { detached: true, stdio: 'ignore' }).unref(); }

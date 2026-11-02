@@ -2,7 +2,7 @@
 // and put the image on the clipboard, using whatever the desktop provides.
 // Both are best effort — a headless box has neither — and report whether they
 // worked so the caller can say so rather than claim a copy that did not happen.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -39,6 +39,24 @@ function run(command: Command, timeoutMs = 5_000): Promise<boolean> {
 export async function revealInFolder(file: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
   const command = revealCommand(platform, file);
   return command ? run(command) : false;
+}
+
+// Open a URL in the default browser. rundll32 hands it to the shell directly on
+// Windows; `cmd /c start` would read the `&` between query parameters as a
+// command separator.
+export function browserCommand(platform: NodeJS.Platform, url: string): Command {
+  if (platform === 'darwin') return { file: 'open', args: [url] };
+  if (platform === 'win32') return { file: 'rundll32', args: ['url.dll,FileProtocolHandler', url] };
+  return { file: 'xdg-open', args: [url] };
+}
+
+// Best effort: the caller prints the URL as well, so a missing opener must not
+// take the process down with an unhandled 'error' event.
+export function openInBrowser(url: string, platform: NodeJS.Platform = process.platform): void {
+  const command = browserCommand(platform, url);
+  const child = spawn(command.file, command.args, { detached: true, stdio: 'ignore' });
+  child.on('error', () => { /* the printed URL is the fallback */ });
+  child.unref();
 }
 
 export async function copyImageToClipboard(file: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
