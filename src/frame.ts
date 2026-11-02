@@ -52,16 +52,17 @@ function codexPlan(profile: SubscriptionProfile | null | undefined): string {
   // plan name is the whole of what can be known.
   return names[raw.toLowerCase()] || raw;
 }
-// Anthropic is renaming Max 20x to Ultra; the profile API may then report an
-// 'ultra' tier or org type instead of 'default_claude_max_20x'. A tier this
-// function does not recognise is shown as reported rather than as 'OAuth', so
-// a renamed plan never reads like an account with no subscription at all.
+// Anthropic renamed Max 20x to Ultra (November 2026), but the profile API still
+// reports 'default_claude_max_20x', so the 20x tier is shown under its current
+// name; a later 'ultra' tier or org type reads the same. A tier this function
+// does not recognise is shown as reported rather than as 'OAuth', so a renamed
+// plan never reads like an account with no subscription at all.
 export function claudeTier(profile: SubscriptionProfile | null | undefined): string {
   if (!profile) return 'OAuth';
   const raw = profile.rateLimitTier || ''; const org = profile.orgType || '';
   if (/ultra/i.test(raw) || /ultra/i.test(org)) return 'Ultra';
   const match = /(\d+x)$/i.exec(raw);
-  if (match) return `Max ${match[1]}`;
+  if (match) return match[1]!.toLowerCase() === '20x' ? 'Ultra' : `Max ${match[1]}`;
   if (profile.hasClaudeMax || org === 'claude_max') return 'Max';
   if (profile.hasClaudePro || org === 'claude_pro') return 'Pro';
   const reported = raw.replace(/^default_claude_/i, '') || org.replace(/^claude_/i, '');

@@ -78,7 +78,7 @@ test('buildFrame pads to the terminal height when given one and not otherwise', 
 test('claudeTier: Max multipliers, the Ultra rename, and unknown tiers shown as reported', () => {
   const p = (rateLimitTier: string | null, orgType: string | null = null, hasClaudeMax: boolean | null = null) => ({ status: 'active', createdAt: null, rateLimitTier, orgType, hasClaudeMax, hasClaudePro: null, fetchedAt: 0 });
   assert.equal(claudeTier(null), 'OAuth');
-  assert.equal(claudeTier(p('default_claude_max_20x', 'claude_max')), 'Max 20x');
+  assert.equal(claudeTier(p('default_claude_max_20x', 'claude_max')), 'Ultra');
   assert.equal(claudeTier(p('default_claude_max_5x', 'claude_max')), 'Max 5x');
   assert.equal(claudeTier(p('default_claude_ultra', 'claude_max', true)), 'Ultra');
   assert.equal(claudeTier(p(null, 'claude_ultra')), 'Ultra');
