@@ -13,9 +13,9 @@ TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **
 ## Requisitos
 
 - Node.js 20 o superior
-- macOS o Linux
+- macOS, Linux o Windows
 - `claude` y/o `codex` instalados por separado
-- Tus propias cuentas de suscripción Claude Pro/Max o ChatGPT Codex
+- Tus propias cuentas de suscripción Claude Pro/Max/Ultra o ChatGPT Codex
 
 ## Instalación
 
@@ -37,6 +37,12 @@ npm install
 npm run build          # obligatorio: dist/ no está versionado
 npm link
 ```
+
+En Windows, `install.sh` necesita un shell bash, así que usa los pasos manuales de arriba.
+`npm link` crea los comandos `teamai`/`tai`/`tac`/`tax` para `cmd.exe` y
+PowerShell, y los lanzadores ejecutan los `claude.cmd`/`codex.cmd` instalados con
+npm escapando cada argumento para `cmd.exe`. Las secciones de configuración del
+shell y de elemento de inicio de sesión son para macOS y Linux.
 
 ¿Quieres automatizar esto desde un agente de IA? Consulta [AGENTS.md](AGENTS.md),
 que expone los mismos pasos como comandos deterministas con verificación y
@@ -129,6 +135,8 @@ hereda el PATH de tu shell.
 
 Codex usa su flujo habitual de inicio de sesión por navegador. TeamAI no requiere que esté habilitada la opción de autenticación por código de dispositivo de ChatGPT.
 
+El inicio de sesión de Claude abre la página de autorización en el navegador predeterminado (`open` en macOS, `xdg-open` en Linux, `rundll32` en Windows). La URL también se imprime siempre, así que en una máquina sin interfaz ni navegador el inicio de sesión sigue adelante: ábrela en cualquier equipo y termina allí.
+
 Importar credenciales es opcional y solo funciona cuando existe un archivo de credenciales exportable:
 
 ```bash
@@ -181,18 +189,18 @@ disponible, la solicitud recae en una reservada en lugar de fallar. Una
 solicitud Fable conserva el orden normal de menor consumo; pon
 `fableReserveThreshold` en `1` para desactivar la separación.
 
-Un 429 de nivel Fable (`7d_oi` rechazada mientras las ventanas compartidas
-`5h`/`7d` siguen permitidas) solo limita la ventana Fable de esa cuenta, no la
+Un 429 de nivel Fable (`7d_oi` rechazada mientras la ventana compartida
+`7d` sigue permitida) solo limita la ventana Fable de esa cuenta, no la
 cuenta: todos los demás modelos se siguen atendiendo desde ella, en vez de que
 la cuenta entera quede inactiva hasta una semana por un presupuesto que solo
 consume el modelo superior. Un 429 que rechaza una ventana compartida limita la
 cuenta como de costumbre.
 
-La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente las ventanas `5h session`, `7d overall` y la ventana por modelo `7d Fable`; las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
+La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente la ventana `7d overall` y la ventana por modelo `7d Fable` (Claude integró su límite de sesión de 5 horas en el semanal en noviembre de 2026, así que la columna `5h session` solo aparece mientras alguna cuenta siga reportando una ventana de 5 horas activa); las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
 
-El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan y, en rojo, los estados de suscripción problemáticos como `past_due`.
+El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan (`Ultra`, `Max 20x`, `Max 5x`, `Pro`; un nivel que TeamAI no reconoce se muestra con el nombre reportado en lugar de `OAuth`) y, en rojo, los estados de suscripción problemáticos como `past_due`.
 
-`p` guarda una captura del panel, y `teamai capture` hace lo mismo desde un script o un agente sin necesidad de terminal. Cada captura es un par de archivos bajo `~/.config/teamai/captures/` (o `--out DIR`): el cuadro como texto con sus colores intactos, y el mismo cuadro como PNG dibujado con una fuente de mapa de bits integrada, así que no hace falta nada más que Node. Las direcciones de las cuentas se enmascaran antes de dibujar el cuadro —en la columna de cuentas, en el pie y en el registro de actividad por igual— como `de•••••••••w@gm•••.com` de forma predeterminada; `--redact full` las reemplaza por `account #N`, y `--redact none` las conserva para una captura que se quede en privado. Desde el panel, `p` además muestra el PNG en el administrador de archivos y copia la imagen al portapapeles —en macOS sin configurar nada, en Linux si están instalados `xdg-open` y `wl-copy` o `xclip`— y el pie indica cuáles de esas acciones ocurrieron. La imagen al comienzo de este README es una de esas capturas.
+`p` guarda una captura del panel, y `teamai capture` hace lo mismo desde un script o un agente sin necesidad de terminal. Cada captura es un par de archivos bajo `~/.config/teamai/captures/` (o `--out DIR`): el cuadro como texto con sus colores intactos, y el mismo cuadro como PNG dibujado con una fuente de mapa de bits integrada, así que no hace falta nada más que Node. Las direcciones de las cuentas se enmascaran antes de dibujar el cuadro —en la columna de cuentas, en el pie y en el registro de actividad por igual— como `de•••••••••w@gm•••.com` de forma predeterminada; `--redact full` las reemplaza por `account #N`, y `--redact none` las conserva para una captura que se quede en privado. Desde el panel, `p` además muestra el PNG en el administrador de archivos y copia la imagen al portapapeles —en macOS sin configurar nada, en Linux si están instalados `xdg-open` y `wl-copy` o `xclip`, y en Windows solo se guardan los archivos— y el pie indica cuáles de esas acciones ocurrieron. La imagen al comienzo de este README es una de esas capturas.
 
 `R` vuelve a medir la cuota de toda la flota. La cuota nunca se consulta desde un endpoint aparte: se aprende de los encabezados de límite de tasa que devuelve el upstream, así que una cuenta que no ha atendido tráfico muestra `-` hasta que algo la mida. `R` reproduce en paralelo una forma de solicitud que ya se sabe aceptada contra cada cuenta inactiva (incluidas las ya medidas y las limitadas, cuyos 429 igualmente traen encabezados autoritativos) e informa un recuento honesto de `measured/targets`. Esa forma de solicitud solo se fija a partir de un 2xx real que haya pasado por el proxy, de modo que hasta que una solicitud no haya tenido éxito, `R` informa que todavía no existe una plantilla de sondeo en lugar de adivinar una carga útil. Las cuentas a las que les falta la ventana semanal por modelo (Fable) reciben un sondeo complementario adicional, porque esa ventana solo aparece en las respuestas a solicitudes de nivel Fable.
 

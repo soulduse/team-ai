@@ -13,9 +13,9 @@ TeamAI is a local multi-account relay for **Claude Code** and the official **Cod
 ## Requirements
 
 - Node.js 20+
-- macOS or Linux
+- macOS, Linux, or Windows
 - `claude` and/or `codex` installed separately
-- Your own Claude Pro/Max or ChatGPT Codex subscription accounts
+- Your own Claude Pro/Max/Ultra or ChatGPT Codex subscription accounts
 
 ## Install
 
@@ -37,6 +37,12 @@ npm install
 npm run build          # required: dist/ is not committed
 npm link
 ```
+
+On Windows, `install.sh` needs a bash shell, so use these manual steps instead.
+`npm link` creates `teamai`/`tai`/`tac`/`tax` commands for `cmd.exe` and
+PowerShell, and the launchers start an npm-installed `claude.cmd`/`codex.cmd`
+with every argument escaped for `cmd.exe`. The shell setup and login-item
+sections below are for macOS and Linux.
 
 Automating this from an AI agent? See [AGENTS.md](AGENTS.md), which states the
 same steps as deterministic commands with verification and failure branches.
@@ -124,6 +130,8 @@ your shell's PATH.
 
 Codex uses its normal browser login flow. TeamAI does not require ChatGPT's optional device-code authentication setting to be enabled.
 
+Claude login opens the authorization page in the default browser (`open` on macOS, `xdg-open` on Linux, `rundll32` on Windows). The URL is always printed too, so on a headless box with no browser opener the login still goes ahead: open it on any machine and finish there.
+
 Credential import is optional and only works when an exportable credential file exists:
 
 ```bash
@@ -174,17 +182,17 @@ falls back to a reserved one rather than failing. A Fable request keeps the
 plain least-spent order; set `fableReserveThreshold` to `1` to turn the split
 off.
 
-A Fable-tier 429 (`7d_oi` rejected while the shared `5h`/`7d` windows are still
+A Fable-tier 429 (`7d_oi` rejected while the shared `7d` window is still
 allowed) benches only that account's Fable window, not the account: every other
 model keeps being served from it, instead of the whole account sitting idle for
 up to a week over a budget only the top model spends. A 429 that rejects a
 shared window benches the account as usual.
 
-The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the `5h session`, `7d overall`, and model-scoped `7d Fable` windows independently; Codex rows show its primary and secondary windows, each titled with the span that account actually reports (`1w limit`). Quotas are learned from official-client responses and retained across restarts.
+The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the `7d overall` and model-scoped `7d Fable` windows independently — Claude folded its 5-hour session limit into the weekly one in November 2026, so a `5h session` column appears only while some account still reports a live 5-hour window; Codex rows show its primary and secondary windows, each titled with the span that account actually reports (`1w limit`). Quotas are learned from official-client responses and retained across restarts.
 
-The footer exposes the same account workflow as TeamClaude: launch Claude/Codex, select, switch, enable/disable, order, delete, add/login, re-measure (`R`), and quit. `switch` pins the selected account to the front of its provider pool; order mode can assign a rank or return an account to automatic scheduling. Claude profile refreshes show the plan tier and unhealthy subscription states such as `past_due` in red.
+The footer exposes the same account workflow as TeamClaude: launch Claude/Codex, select, switch, enable/disable, order, delete, add/login, re-measure (`R`), and quit. `switch` pins the selected account to the front of its provider pool; order mode can assign a rank or return an account to automatic scheduling. Claude profile refreshes show the plan tier (`Ultra`, `Max 20x`, `Max 5x`, `Pro`; a tier TeamAI does not recognise is shown by its reported name rather than as `OAuth`) and unhealthy subscription states such as `past_due` in red.
 
-`p` saves a capture of the dashboard, and `teamai capture` does the same from a script or an agent, no terminal required. Each capture is a pair of files under `~/.config/teamai/captures/` (or `--out DIR`): the frame as text with its colors intact, and the same frame as a PNG drawn with a built-in bitmap font, so nothing beyond Node is needed. Account addresses are masked before the frame is drawn — in the account column, the footer and the activity log alike — as `de•••••••••w@gm•••.com` by default; `--redact full` replaces them with `account #N`, and `--redact none` keeps them for a capture that stays private. From the dashboard, `p` also reveals the PNG in your file manager and puts the image on the clipboard — on macOS out of the box, on Linux where `xdg-open` and `wl-copy` or `xclip` are installed — and the footer says which of those happened. The image at the top of this README is one such capture.
+`p` saves a capture of the dashboard, and `teamai capture` does the same from a script or an agent, no terminal required. Each capture is a pair of files under `~/.config/teamai/captures/` (or `--out DIR`): the frame as text with its colors intact, and the same frame as a PNG drawn with a built-in bitmap font, so nothing beyond Node is needed. Account addresses are masked before the frame is drawn — in the account column, the footer and the activity log alike — as `de•••••••••w@gm•••.com` by default; `--redact full` replaces them with `account #N`, and `--redact none` keeps them for a capture that stays private. From the dashboard, `p` also reveals the PNG in your file manager and puts the image on the clipboard — on macOS out of the box, on Linux where `xdg-open` and `wl-copy` or `xclip` are installed; on Windows the files are saved but neither step runs — and the footer says which of those happened. The image at the top of this README is one such capture.
 
 `R` re-measures quota across the whole fleet. Quota is never polled from a separate endpoint — it is learned from the rate-limit headers upstream returns, so an account that has served no traffic shows `-` until something measures it. `R` replays a known-accepted request shape against every idle account in parallel (including already-measured and throttled ones, whose 429s still carry authoritative headers) and reports an honest `measured/targets` count. That shape is committed only from a real 2xx that flowed through the proxy, so until one request has succeeded `R` reports that no probe template exists yet rather than guessing a payload. Accounts missing the model-scoped weekly (Fable) window get one extra top-up probe, because that window only appears on responses to Fable-tier requests.
 
