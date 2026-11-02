@@ -24,14 +24,15 @@ export function clean(value: unknown, max: number): string | null {
 
 export const LIMITS = { method: 16, path: 256, account: 64, model: 64, effort: 16, sessionId: 64 } as const;
 
-export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId' | 'route' | 'routeFallback' | 'streamEnd' | 'capacityRetries'>>;
+export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId' | 'group' | 'route' | 'routeFallback' | 'streamEnd' | 'capacityRetries'>>;
 
 export function requestMessage(request: RequestSummary): string {
   const account = request.account ? ` → ${request.account}` : '';
   const model = request.model ? ` (${request.model}${request.effort ? `·${request.effort}` : ''})` : '';
+  const group = request.group ? ` [group:${request.group}]` : '';
   const route = request.route ? ` [route:${request.route}${request.routeFallback ? '→fallback' : ''}]` : '';
   const ended = request.streamEnd ? ` ${request.streamEnd}` : '';
-  return `${request.providerLabel} ${request.method} ${request.path}${model}${account}${route} ${request.status}${ended}${request.capacityRetries ? ` capacity retry x${request.capacityRetries}` : ''} (${(request.durationMs / 1000).toFixed(1)}s)`;
+  return `${request.providerLabel} ${request.method} ${request.path}${model}${account}${group}${route} ${request.status}${ended}${request.capacityRetries ? ` capacity retry x${request.capacityRetries}` : ''} (${(request.durationMs / 1000).toFixed(1)}s)`;
 }
 
 export class ActivityLog implements ActivitySink {
@@ -49,6 +50,7 @@ export class ActivityLog implements ActivitySink {
   update(id: string, patch: ActivityPatch): void {
     const entry = this.open.get(id); if (!entry) return;
     for (const key of ['account', 'model', 'effort', 'sessionId'] as const) if (key in patch) entry[key] = clean(patch[key], LIMITS[key]);
+    if ('group' in patch) entry.group = clean(patch.group, LIMITS.account);
     if ('route' in patch) entry.route = clean(patch.route, LIMITS.account);
     if ('routeFallback' in patch) entry.routeFallback = patch.routeFallback === true;
     if (patch.streamEnd === 'failed' || patch.streamEnd === 'incomplete') entry.streamEnd = patch.streamEnd;
@@ -59,7 +61,7 @@ export class ActivityLog implements ActivitySink {
   end(id: string, status: number | string, at = Date.now()): void {
     const entry = this.open.get(id); if (!entry) return;
     this.open.delete(id);
-    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null, route: entry.route ?? null, routeFallback: entry.routeFallback ?? false, ...(entry.capacityRetries ? { capacityRetries: entry.capacityRetries } : {}), ...(entry.streamEnd ? { streamEnd: entry.streamEnd } : {}) };
+    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null, ...(entry.group ? { group: entry.group } : {}), route: entry.route ?? null, routeFallback: entry.routeFallback ?? false, ...(entry.capacityRetries ? { capacityRetries: entry.capacityRetries } : {}), ...(entry.streamEnd ? { streamEnd: entry.streamEnd } : {}) };
     this.record({ at, message: requestMessage(request), request });
   }
 

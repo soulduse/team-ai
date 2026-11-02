@@ -2,7 +2,7 @@ import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { applyConfig, describeApply } from './config-apply.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
-import { buildFrame, displayOrder, frozenOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
+import { buildFrame, displayOrder, frozenOrder, navigationOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
 import { createHostTracker } from './host-metrics.js';
 import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
@@ -23,14 +23,14 @@ export async function runTui(): Promise<void> {
   // drawn and walked in that order, so saving a rank does not move the row
   // under the cursor; leaving the mode clears it and the next frame sorts again.
   let frozen: string[] | null = null;
-  const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); const state = await loadState(); return frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config)); };
+  const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); const state = await loadState(); return navigationOrder(config, frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); };
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   // This PC's CPU/RAM for the header, re-sampled on every redraw (the 500 ms
   // tick), so the CPU% is the load over the last half second.
   const host = createHostTracker();
   const screen = startScreen(process.stdout, async ({ width, height }) => {
-    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
+    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(navigationOrder(config, frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config)))); if (current && !selectedId) selectedId = current.credentialId;
     return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, frozen: frozen ?? undefined, credits, routes: routeEditor, host: host.sample() });
   });
   const render = (): Promise<void> => screen.render();
@@ -147,7 +147,7 @@ export async function runTui(): Promise<void> {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
-      else if (key === 'o') { frozen = (await rows()).map((account) => account.credentialId); mode = 'order'; } else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
+      else if (key === 'o') { const config = await loadConfig(); frozen = displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)).map((account) => account.credentialId); mode = 'order'; } else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();

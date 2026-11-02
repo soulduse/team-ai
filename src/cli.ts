@@ -10,13 +10,14 @@ import { captureDashboard } from './capture.js';
 import { describeApply, reloadServerConfig } from './config-apply.js';
 import { stripAnsi } from './columns.js';
 import { linkShadowEntries, relayedCodexConfig } from './codex-config.js';
+import { claudeGroupArgs, groupStatusLines } from './groups.js';
 import { hostText, measureHost } from './host-metrics.js';
 import { isRedactLevel } from './redact.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { addRoute, describeReload, removeRoute } from './route-config.js';
 import { parseRoutes } from './routes.js';
 import { ensureServer, runServer, runningPid } from './runtime.js';
-import { loadConfig, loadState, updateConfig, upsertAccount } from './storage.js';
+import { loadConfig, loadSessions, loadState, updateConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
 import type { ProviderId } from './types.js';
 
@@ -90,7 +91,15 @@ async function priority(): Promise<void> { const id = provider(args[0]); const r
 // reads it when it starts. A refusal or an unreachable server is an error exit.
 async function reportReload(): Promise<void> { const outcome = await reloadServerConfig(); console.log(`Server: ${describeApply(outcome)}`); if (outcome.status === 'refused' || outcome.status === 'failed') process.exitCode = 1; }
 
-async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); const host = await measureHost(); console.log(`Host: ${stripAnsi(hostText(host, true))} (${host.cpu.cores} cores)`); await accounts(); await resetCreditStatus(); await routeStatus(); }
+async function status(): Promise<void> {
+  const pid = await runningPid();
+  console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped');
+  const host = await measureHost(); console.log(`Host: ${stripAnsi(hostText(host, true))} (${host.cpu.cores} cores)`);
+  await accounts(); await resetCreditStatus(); await routeStatus();
+  const config = await loadConfig(); const state = await loadState();
+  for (const line of groupStatusLines(config, state)) console.log(line);
+  for (const binding of Object.values(await loadSessions())) if (binding.group) console.log(`Session ${binding.sessionId} group ${binding.group}`);
+}
 
 // Configured model routes, as the server will apply them.
 async function routeStatus(): Promise<void> {
@@ -167,10 +176,13 @@ async function resetCreditStatus(): Promise<void> {
 async function stop(quiet = false): Promise<void> { const pid = await runningPid(); if (!pid) { if (!quiet) console.log('TeamAI server is not running'); return; } process.kill(pid, 'SIGTERM'); for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((r) => setTimeout(r, 100)); if (!quiet) console.log(`Stopped TeamAI server ${pid}`); }
 
 async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
-  const config = await loadConfig(); if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer();
+  const config = await loadConfig();
+  const selection = id === 'claude' ? claudeGroupArgs(clientArgs, config) : undefined;
+  if (id !== 'claude' && (process.env.TEAMAI_GROUP || clientArgs.some((arg) => arg === '--group' || arg.startsWith('--group=')))) throw new Error('--group and TEAMAI_GROUP are supported only for Claude');
+  if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer();
   if (id === 'claude') {
     const argsToPass = await prepareClaudeArgs(clientArgs, config);
-    const result = spawnSync('claude', argsToPass, { stdio: 'inherit', env: { ...process.env, ANTHROPIC_BASE_URL: `http://${config.proxy.host}:${config.proxy.claudePort}`, ANTHROPIC_AUTH_TOKEN: config.proxy.clientToken } });
+    const result = spawnSync('claude', argsToPass, { stdio: 'inherit', env: { ...process.env, ANTHROPIC_BASE_URL: `http://${config.proxy.host}:${config.proxy.claudePort}`, ANTHROPIC_AUTH_TOKEN: config.proxy.clientToken, ...(selection?.group ? { ANTHROPIC_CUSTOM_HEADERS: [process.env.ANTHROPIC_CUSTOM_HEADERS, `x-teamai-group: ${selection.group}`].filter(Boolean).join('\n') } : {}) } });
     if (result.error) throw result.error; process.exitCode = result.status ?? 1; return;
   }
   const shadow = join(process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai'), 'codex-home'); await mkdir(shadow, { recursive: true, mode: 0o700 });
@@ -214,7 +226,8 @@ Usage:
   tai                                  Open the TeamAI dashboard
   tac [CLAUDE_ARGS...]                 Start a relayed Claude Code session
   tax [CODEX_ARGS...]                  Start a relayed Codex session
-  teamai claude [CLAUDE_ARGS...]       Start a relayed Claude Code session
+  teamai claude [--group NAME] [CLAUDE_ARGS...]  Start a relayed Claude Code session
+                                       TEAMAI_GROUP supplies the default group
   teamai codex [CODEX_ARGS...]         Start a relayed Codex session
   teamai session [CLIENT_ARGS...]      Choose Claude or Codex interactively
   teamai login [claude|codex]          Claude: the browser callback, or paste the

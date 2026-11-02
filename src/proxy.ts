@@ -180,7 +180,7 @@ let requestCounter = 0;
 // an upstream stream that broke after the headers went out; finished is the
 // terminal SSE event the stream delivered, if any; setEnd records it on the
 // activity line.
-interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void; setEnd(end: StreamEnd): void; setCapacityRetries(count: number): void }
+interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void; setGroup?(group: string | null): void; setEnd(end: StreamEnd): void; setCapacityRetries(count: number): void }
 
 // The body parsed once, for the fields the activity line shows. Not kept.
 function parsedBody(body: Buffer): unknown {
@@ -234,7 +234,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       begin(); opened = id;
       // A response.failed or response.incomplete arrives under a 200: without
       // a mark of its own the line reads as a success.
-      track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })), setEnd: (end) => { if (end !== 'completed') safely(() => activity.update(id, { streamEnd: end })); }, setCapacityRetries: (count) => safely(() => activity.update(id, { capacityRetries: count })) };
+      track = { cut: false, setGroup: (group) => safely(() => activity.update(id, { group })), setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })), setEnd: (end) => { if (end !== 'completed') safely(() => activity.update(id, { streamEnd: end })); }, setCapacityRetries: (count) => safely(() => activity.update(id, { capacityRetries: count })) };
       let held = 0;
       try {
         let body: Buffer;
@@ -403,7 +403,11 @@ async function dispatchClaude(
     }
   } else {
     const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? false;
-    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, wantsFable, route);
+    const expectedGroup = req.headers['x-teamai-group'];
+    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, wantsFable, route, typeof expectedGroup === 'string' ? expectedGroup : undefined);
+    track.setGroup?.(resolution.group ?? null);
+    if (resolution.status === 'group_mismatch') { json(res, 409, { error: 'Requested group differs from the session group; resume with its original group or omit --group and TEAMAI_GROUP' }); return; }
+    if (resolution.status === 'group_unavailable') { json(res, 503, { error: 'Session group is missing or no longer contains its bound account; binding unchanged' }); return; }
 
     if (resolution.status === 'storage_error') {
       json(res, 500, { error: 'Session binding storage corrupted: fail-closed to protect session pinning' });
@@ -448,7 +452,7 @@ async function dispatchClaude(
       return;
     }
     if (resolution.status === 'no_account' || !resolution.account) {
-      const shortfall = pool.explainShortfall(new Set(), wantsFable, route);
+      const shortfall = pool.explainShortfall(new Set(), wantsFable, route, resolution.group);
       onChange(`${pool.provider.label} ${req.method} ${path} → 429 ${shortfall.reason}${wantsFable ? ' (fable)' : ''}${shortfall.retryAfterMs ? `, next reset ${AccountPool.formatDuration(shortfall.retryAfterMs)}` : ''}`);
       const headers: Record<string, string> = { 'x-teamai-429-reason': shortfall.reason };
       if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));

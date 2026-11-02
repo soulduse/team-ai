@@ -92,7 +92,9 @@ export async function saveCredentials(value: Record<string, OAuthCredential>): P
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
 
-type SessionLedger = Record<string, 'pending' | 'bound'>;
+type SessionLedgerEntry = 'pending' | 'bound' | { state: 'pending' | 'bound'; group: string };
+type SessionLedger = Record<string, SessionLedgerEntry>;
+const ledgerState = (entry: SessionLedgerEntry): 'pending' | 'bound' => typeof entry === 'string' ? entry : entry.state;
 
 function ledgerPathFor(sessionsPath: string): string {
   return join(dirname(sessionsPath), '.sessions-ledger.json');
@@ -112,8 +114,11 @@ function validateLedger(raw: unknown): SessionLedger {
   if (!raw || typeof raw !== 'object') throw new Error('Invalid session ledger');
   const ledger: SessionLedger = Object.create(null);
   for (const [id, state] of Object.entries(raw)) {
-    if (!id.trim() || ['__proto__', 'constructor', 'prototype'].includes(id) || (state !== 'pending' && state !== 'bound')) throw new Error('Invalid session ledger entry');
-    ledger[id] = state;
+    const grouped = state && typeof state === 'object' && !Array.isArray(state)
+      && ['pending', 'bound'].includes(state.state) && typeof state.group === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(state.group);
+    if (!id.trim() || ['__proto__', 'constructor', 'prototype'].includes(id) || (state !== 'pending' && state !== 'bound' && !grouped)) throw new Error('Invalid session ledger entry');
+    ledger[id] = state as SessionLedgerEntry;
   }
   return ledger;
 }
@@ -130,10 +135,12 @@ async function readSessionStore(): Promise<{ bindings: StoredSessionBindings; le
   const bindings = validateSessionBindings(JSON.parse(text));
   const ledger = validateLedger(JSON.parse(ledgerText));
   for (const [id, state] of Object.entries(ledger)) {
-    if ((state === 'bound') !== Object.hasOwn(bindings, id)) throw new Error('Session ledger and bindings disagree');
+    if ((ledgerState(state) === 'bound') !== Object.hasOwn(bindings, id)) throw new Error('Session ledger and bindings disagree');
   }
   for (const id of Object.keys(bindings)) {
-    if (ledger[id] !== 'bound') throw new Error('Session binding has no ledger record');
+    if (!ledger[id] || ledgerState(ledger[id]!) !== 'bound') throw new Error('Session binding has no ledger record');
+    const entry = ledger[id]!;
+    if (bindings[id]!.group !== (typeof entry === 'string' ? undefined : entry.group)) throw new Error('Session group and ledger disagree');
   }
   return { bindings, ledger, fresh: false };
 }
@@ -147,14 +154,14 @@ async function initializeSessionStore(): Promise<void> {
 
 // Only the authenticated relay control handler calls this for client launches.
 // Callers cannot register a chosen conversation ID.
-export function issueClaudeSession(): Promise<string> {
+export function issueClaudeSession(group?: string): Promise<string> {
   const path = paths().sessions;
   return serialized(path, async () => {
     const { ledger, fresh } = await readSessionStore();
     if (fresh) await initializeSessionStore();
     let id: string;
     do { id = randomUUID(); } while (Object.hasOwn(ledger, id));
-    ledger[id] = 'pending';
+    ledger[id] = group === undefined ? 'pending' : { state: 'pending', group };
     await atomicWrite(ledgerPathFor(path), ledger);
     return id;
   });
@@ -191,7 +198,7 @@ export function adoptClaudeSession(sessionId: string, pick: () => StoredSessionB
     const { bindings, ledger, fresh } = await readSessionStore();
     const binding = pick();
     if (binding.sessionId !== sessionId || binding.provider !== 'claude') throw new Error('Adopted binding does not match the request');
-    if (ledger[sessionId] === 'pending') return 'pending';
+    if (ledger[sessionId] && ledgerState(ledger[sessionId]!) === 'pending') return 'pending';
     const existing = bindings[sessionId];
     if (existing) {
       const same = existing.provider === 'claude' && existing.accountId === binding.accountId
@@ -244,7 +251,9 @@ export function validateSessionBindings(raw: unknown): StoredSessionBindings {
     if (typeof entry.boundAt !== 'number' || !Number.isFinite(entry.boundAt)) {
       throw new Error(`Corrupt session binding for "${key}": invalid boundAt timestamp`);
     }
+    if (entry.group !== undefined && (typeof entry.group !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(entry.group))) throw new Error('Corrupt session group');
     result[key] = {
+      ...(entry.group === undefined ? {} : { group: entry.group as string }),
       sessionId: entry.sessionId,
       provider: entry.provider,
       accountId: entry.accountId,
@@ -260,18 +269,23 @@ export function loadSessions(): Promise<StoredSessionBindings> {
   return serialized(paths().sessions, async () => (await readSessionStore()).bindings);
 }
 
-export function updateSessions(change: (bindings: StoredSessionBindings, pending: ReadonlySet<string>) => void | false | Promise<void | false>): Promise<boolean> {
+export function updateSessions(change: (bindings: StoredSessionBindings, pending: ReadonlySet<string>, groups: ReadonlyMap<string, string>) => void | false | Promise<void | false>): Promise<boolean> {
   const path = paths().sessions;
   return serialized(path, async () => {
     const { bindings, ledger, fresh } = await readSessionStore();
-    const pending = new Set(Object.keys(ledger).filter((id) => ledger[id] === 'pending'));
-    if (await change(bindings, pending) === false) return false;
+    const pending = new Set(Object.keys(ledger).filter((id) => ledgerState(ledger[id]!) === 'pending'));
+    const groups = new Map(Object.entries(ledger).flatMap(([id, entry]) => typeof entry === 'string' ? [] : [[id, entry.group] as const]));
+    if (await change(bindings, pending, groups) === false) return false;
     const validated = validateSessionBindings(bindings);
     for (const id of Object.keys(validated)) {
       if (!Object.hasOwn(ledger, id)) throw new Error('Cannot bind an unregistered session');
     }
     if (fresh) throw new Error('Session registration required before binding');
-    for (const id of Object.keys(validated)) ledger[id] = 'bound';
+    for (const id of Object.keys(validated)) {
+      const group = groups.get(id);
+      if (validated[id]!.group !== group) throw new Error('Cannot change a registered session group');
+      ledger[id] = group === undefined ? 'bound' : { state: 'bound', group };
+    }
     // Consume registration before committing the binding. A crash between these
     // writes leaves a missing bound entry and refuses every subsequent request.
     await atomicWrite(ledgerPathFor(path), ledger);

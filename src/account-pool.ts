@@ -1,3 +1,4 @@
+import type { AccountGroups } from './groups.js';
 import { randomUUID } from 'node:crypto';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
@@ -220,9 +221,16 @@ export class AccountPool {
     return true;
   }
 
-  // Model routes for this provider, from config. setRoutes returns a warning
-  // for each account reference that names no account here; such a reference
-  // is skipped, the rest of the route still applies.
+  // Group membership is resolved to account ids before a config swap.
+  private groups: AccountGroups = Object.create(null);
+  setGroups(groups: AccountGroups): void { this.groups = groups; }
+  hasGroup(name: string): boolean { return Object.hasOwn(this.groups, name); }
+  private groupExclusions(group?: string): Set<string> {
+    if (group === undefined) return new Set();
+    return new Set(this.accounts.filter((a) => !this.groups[group]?.includes(a.id)).map((a) => a.id));
+  }
+
+  // Model routes may warn about missing members; groups reject them instead.
   private routes: Route[] = [];
   private routeFellBack = new Set<string>();
   setRoutes(routes: Route[]): string[] {
@@ -260,8 +268,8 @@ export class AccountPool {
   // needs to decide what to do: whether it is a slot shortage (retry in a
   // moment) or a budget shortage, whether only the Fable weekly budget is gone
   // (other models still work), and the earliest moment anything rolls over.
-  explainShortfall(excludedByRequest: Set<string>, wantsFable: boolean, route?: Route | null): Shortfall {
-    const label = this.provider.label; const excluded = this.scope(excludedByRequest, route);
+  explainShortfall(excludedByRequest: Set<string>, wantsFable: boolean, route?: Route | null, group?: string): Shortfall {
+    const label = this.provider.label; const excluded = this.scope(new Set([...excludedByRequest, ...this.groupExclusions(group)]), route);
     if (this.saturatedButHealthy(excluded)) {
       return { reason: 'concurrency_saturated', retryAfterMs: 5_000, message: `Every ${label} account with budget left is at its concurrency cap (${this.maxConcurrent} requests in flight each). Retry in a few seconds.` };
     }
@@ -375,8 +383,8 @@ export class AccountPool {
   }
 
   // Initial account selection for a brand-new Claude session.
-  pickClaudeInitial(wantsFable: boolean, route: Route | null = null): RuntimeAccount | null {
-    const excluded = this.scope(NO_EXCLUSIONS, route);
+  pickClaudeInitial(wantsFable: boolean, route: Route | null = null, group?: string): RuntimeAccount | null {
+    const excluded = this.scope(this.groupExclusions(group), route);
     return this.pick(excluded, wantsFable, route, this.availableNow);
   }
 
@@ -385,9 +393,11 @@ export class AccountPool {
     sessionId: string,
     wantsFable: boolean,
     route: Route | null = null,
+    expectedGroup?: string,
   ): Promise<{
+    group?: string;
     account: RuntimeAccount | null;
-    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error' | 'credential_mismatch';
+    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error' | 'credential_mismatch' | 'group_unavailable' | 'group_mismatch';
     cooldownUntil?: number | null;
     cooldownReason?: string | null;
     retryAfterMs?: number | null;
@@ -396,12 +406,16 @@ export class AccountPool {
       boundId: null as string | null,
       credentialId: undefined as string | undefined,
       actualAccountId: undefined as string | undefined,
-      outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error',
+      group: undefined as string | undefined,
+      outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error' | 'group_unavailable' | 'group_mismatch',
     };
 
     try {
-      await updateSessions(async (bindings, pending) => {
+      await updateSessions(async (bindings, pending, groups) => {
         const existing = bindings[sessionId];
+        state.group = existing?.group ?? groups.get(sessionId);
+        if (expectedGroup !== undefined && expectedGroup !== state.group) { state.outcome = 'group_mismatch'; return false; }
+        if (state.group !== undefined && !this.hasGroup(state.group)) { state.outcome = 'group_unavailable'; return false; }
         if (existing && existing.provider === 'claude') {
           state.boundId = existing.accountId;
           state.credentialId = existing.credentialId;
@@ -414,7 +428,7 @@ export class AccountPool {
           return false;
         }
 
-        const initialSelected = this.pickClaudeInitial(wantsFable, route);
+        const initialSelected = this.pickClaudeInitial(wantsFable, route, state.group);
         if (!initialSelected) {
           state.outcome = 'no_account';
           return false;
@@ -433,6 +447,7 @@ export class AccountPool {
         const binding: StoredSessionBinding = {
           sessionId,
           provider: 'claude',
+          ...(state.group === undefined ? {} : { group: state.group }),
           accountId: initialSelected.id,
           credentialId: initialSelected.credentialId,
           actualAccountId,
@@ -444,9 +459,10 @@ export class AccountPool {
       return { account: null, status: 'storage_error' };
     }
 
+    if (state.outcome === 'group_unavailable' || state.outcome === 'group_mismatch') return { account: null, status: state.outcome, group: state.group };
     if (state.outcome === 'storage_error') return { account: null, status: 'storage_error' };
     if (state.outcome === 'unproven') return { account: null, status: 'unproven' };
-    if (state.outcome === 'no_account' || !state.boundId) return { account: null, status: 'no_account' };
+    if (state.outcome === 'no_account' || !state.boundId) return { account: null, status: 'no_account', group: state.group };
 
     const boundId = state.boundId;
     const bound = this.accounts.find((a) => a.id === boundId);
@@ -461,12 +477,14 @@ export class AccountPool {
       return { account: null, status: 'credential_mismatch' };
     }
 
+    if (state.group !== undefined && !this.groups[state.group]?.includes(bound.id)) return { account: null, status: 'group_unavailable', group: state.group };
     if (!bound.enabled) return { account: null, status: 'disabled' };
 
     const now = Date.now();
     if (bound.cooldownUntil !== null && bound.cooldownUntil > now) {
       return {
         account: bound,
+        group: state.group,
         status: 'cooldown',
         cooldownUntil: bound.cooldownUntil,
         cooldownReason: bound.cooldownReason,
@@ -475,16 +493,16 @@ export class AccountPool {
     }
 
     if (this.atConcurrencyCap(bound)) {
-      return { account: bound, status: 'busy' };
+      return { account: bound, group: state.group, status: 'busy' };
     }
 
     if (wantsFable && !this.servesFable(bound)) {
-      return { account: bound, status: 'model_unsupported' };
+      return { account: bound, group: state.group, status: 'model_unsupported' };
     }
 
     bound.inflight++;
     bound.lastUsed = now;
-    return { account: bound, status: 'ok' };
+    return { account: bound, group: state.group, status: 'ok' };
   }
 
   // An administrator's adoption of a conversation this relay never registered

@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AccountPool } from './account-pool.js';
+import { claudeGroupArgs } from './groups.js';
 import { secureEqual } from './proxy.js';
 import { isLoopback } from './reset-credit-control.js';
 import { adoptableSessionId, issueClaudeSession } from './storage.js';
@@ -63,30 +64,48 @@ export async function requestClaudeAdopt(config: TeamAIConfig, sessionId: string
   return { status: response.status, body };
 }
 
-export async function handleClaudeSessionControl(req: IncomingMessage, res: ServerResponse, token: string): Promise<boolean> {
+export async function handleClaudeSessionControl(req: IncomingMessage, res: ServerResponse, token: string, pool?: AccountPool): Promise<boolean> {
   if (req.url !== CLAUDE_SESSION_PATH) return false;
   res.setHeader('content-type', 'application/json');
   if (!secureEqual(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''), token)) {
     res.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' })); return true;
   }
   if (req.method !== 'POST') { res.writeHead(405).end(JSON.stringify({ error: 'Use POST' })); return true; }
-  // This endpoint accepts no client-selected ID, even in a request body.
-  req.resume();
-  try { const sessionId = await issueClaudeSession(); res.writeHead(201).end(JSON.stringify({ sessionId })); }
+  // A group narrows selection; the relay still generates the conversation ID.
+  const chunks: Buffer[] = []; let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > ADOPT_BODY_LIMIT) { req.resume(); res.writeHead(413).end(JSON.stringify({ error: 'Request body too large' })); return true; }
+    chunks.push(chunk as Buffer);
+  }
+  let group: string | undefined;
+  if (size) {
+    try {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { group?: unknown };
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Body must be an object');
+      if (body.group !== undefined) {
+        if (typeof body.group !== 'string' || !pool?.hasGroup(body.group)) throw new Error('Unknown Claude group');
+        group = body.group;
+      }
+    } catch (error) { res.writeHead(400).end(JSON.stringify({ error: (error as Error).message })); return true; }
+  }
+  try { const sessionId = await issueClaudeSession(group); res.writeHead(201).end(JSON.stringify({ sessionId, ...(group === undefined ? {} : { group }) })); }
   catch { res.writeHead(500).end(JSON.stringify({ error: 'Claude session storage unavailable; refusing new session' })); }
   return true;
 }
 
-export async function prepareClaudeArgs(args: string[], config: TeamAIConfig): Promise<string[]> {
+export async function prepareClaudeArgs(input: string[], config: TeamAIConfig): Promise<string[]> {
+  const { args, group } = claudeGroupArgs(input, config);
   const named = (name: string): boolean => args.some((arg) => arg === name || arg.startsWith(`${name}=`));
   if (named('--session-id') || named('--fork-session')) throw new Error('TeamAI issues Claude session IDs; --session-id and --fork-session are unsupported. Use --resume for a previously bound session.');
   if (named('--resume') || named('--continue') || args.some((arg) => /^-[^-]*[rc]/.test(arg))) return [...args];
   const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
   const response = await fetch(`http://${config.proxy.host}:${port}${CLAUDE_SESSION_PATH}`, {
-    method: 'POST', headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(10_000),
+    method: 'POST', headers: { authorization: `Bearer ${config.proxy.clientToken}`, 'content-type': 'application/json' }, body: JSON.stringify(group === undefined ? {} : { group }), signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`Cannot register new Claude session (control ${response.status}); check session storage and update/restart the relay if needed`);
-  const body = await response.json() as { sessionId?: unknown };
+  const body = await response.json() as { sessionId?: unknown; group?: unknown };
   if (typeof body.sessionId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(body.sessionId)) throw new Error('Relay returned an invalid Claude session ID');
+  if (group !== undefined && body.group !== group) throw new Error('Relay did not confirm the session group; update/restart the relay before launching a grouped session');
   return ['--session-id', body.sessionId, ...args];
 }

@@ -12,6 +12,7 @@ import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { handleRouteControl } from './route-control.js';
 import { configReloadHandler, type ReloadResult } from './config-reload.js';
+import { parseGroups } from './groups.js';
 import { parseBalance } from './pacing.js';
 import { parseRoutes } from './routes.js';
 import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
@@ -64,10 +65,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // One budget for every proxy in this process: the memory is shared.
   const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)), timeoutMs: bodyTimeoutMs(config.proxy.bodyTimeoutMs) };
   const capacitySettings = codexCapacitySettings(config);
+  const groups = parseGroups(config.groups, config.accounts);
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   const balance = parseBalance(config.routing?.balance);
-  for (const pool of pools) { pool.balance = balance; pool.codexCapacity = capacitySettings; }
+  for (const pool of pools) { pool.balance = balance; pool.codexCapacity = capacitySettings; pool.setGroups(groups); }
   // Model routes are checked before anything listens: a malformed route is a
   // startup error rather than a route that silently never applies.
   const routeWarnings = pools.flatMap((pool) => pool.setRoutes(parseRoutes(config.routes?.[pool.provider.id], pool.provider.id)).map((warning) => `${pool.provider.label} ${warning}`));
@@ -171,7 +173,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const control = createServer(async (req, res) => {
       const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
       if (await handleResetCreditControl(req, res, pools.find((p) => p.provider.id === 'codex'), config.proxy.clientToken)) return;
-      if (await handleClaudeSessionControl(req, res, config.proxy.clientToken)) return;
+      if (await handleClaudeSessionControl(req, res, config.proxy.clientToken, pools.find((p) => p.provider.id === 'claude'))) return;
       if (await handleClaudeSessionAdopt(req, res, pools.find((p) => p.provider.id === 'claude'), config.proxy.clientToken, (message) => { console.log(`${new Date().toISOString()} [TeamAI] ${message}`); persist(message); })) return;
       if (await reload(req, res)) return;
       // Routes edited in the dashboard or with `teamai route`, applied in place.
@@ -181,6 +183,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       // Pick up accounts added or removed by the TUI (a separate process) before
       // measuring, so `R` reflects the current fleet without a server restart.
       const [latestConfig, latestCredentials] = await Promise.all([loadConfig(), loadCredentials()]);
+      let latestGroups: ReturnType<typeof parseGroups>;
+      try { latestGroups = parseGroups(latestConfig.groups, latestConfig.accounts); }
+      catch (error) { res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: (error as Error).message })); return; }
+      pools.forEach((p) => p.setGroups(latestGroups));
       const changes = pools.map((p) => p.sync(latestConfig.accounts, latestCredentials)).reduce((a, b) => ({ added: a.added + b.added, removed: a.removed + b.removed }), { added: 0, removed: 0 });
       if (changes.added || changes.removed) {
         persist(`Fleet updated: ${changes.added} added, ${changes.removed} removed`);

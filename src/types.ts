@@ -75,6 +75,7 @@ export interface TeamAIConfig {
   codexCapacityRetryMs?: number;
   codexCapacityPreambleHoldMs?: number;
   codexCapacityRotation?: boolean;
+  groups?: Record<string, string[]>;
   accounts: StoredAccount[];
 }
 
@@ -165,6 +166,8 @@ export interface ActiveRequest {
   model?: string | null;
   effort?: string | null;
   sessionId?: string | null;
+  // The group persisted by the relay when registering this session.
+  group?: string | null;
   // The model route the request matched, and whether it ended up outside it.
   route?: string | null;
   routeFallback?: boolean;
@@ -188,6 +191,7 @@ export interface RequestSummary {
   model?: string | null;
   effort?: string | null;
   sessionId?: string | null;
+  group?: string | null;
   route?: string | null;
   routeFallback?: boolean;
   streamEnd?: 'failed' | 'incomplete';
@@ -329,6 +333,7 @@ export interface Shortfall {
 
 // Durable binding metadata for pinning sessions to accounts.
 export interface StoredSessionBinding {
+  group?: string;
   sessionId: string;
   provider: ProviderId;
   accountId: string;

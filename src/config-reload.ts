@@ -19,6 +19,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AccountPool } from './account-pool.js';
 import { codexCapacitySettings } from './codex-capacity.js';
+import { parseGroups } from './groups.js';
 import { parseBalance } from './pacing.js';
 import { secureEqual } from './proxy.js';
 import { isLoopback } from './reset-credit-control.js';
@@ -76,6 +77,7 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
   const [config, credentials] = await Promise.all([loadConfig(), loadCredentials()]);
   if (!config || typeof config !== 'object') throw new Error('config.json is not an object');
   const accounts = checkAccounts(config.accounts);
+  const groups = parseGroups(config.groups, accounts);
   const routes = pools.map((pool) => parseRoutes(config.routes?.[pool.provider.id], pool.provider.id));
   const balance = parseBalance(config.routing?.balance);
   const capacity = codexCapacitySettings(config);
@@ -88,6 +90,7 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
   pools.forEach((pool, index) => {
     result.accounts[pool.provider.id] = pool.sync(accounts, credentials);
     result.adopted += pool.adoptCredentials(credentials);
+    pool.setGroups(groups);
     pool.balance = balance;
     pool.codexCapacity = capacity;
     result.routes[pool.provider.id] = routes[index]!.length;
