@@ -35,7 +35,7 @@ export async function importAuth(provider: ProviderId, from?: string): Promise<A
     const data = (raw.claudeAiOauth || raw) as Record<string, unknown>;
     if (typeof data.accessToken !== 'string') throw new Error('Claude accessToken is missing');
     const profile = await claudeProfile(data.accessToken);
-    return [{ label: profile.label, credential: { accessToken: data.accessToken, refreshToken: typeof data.refreshToken === 'string' ? data.refreshToken : null, expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : null, accountId: profile.id } }];
+    return [{ label: profile.label, credential: { accessToken: data.accessToken, refreshToken: typeof data.refreshToken === 'string' ? data.refreshToken : null, expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : null, accountId: profile.id, ...(profile.organizationId ? { organizationId: profile.organizationId } : {}) } }];
   }
   const tokens = (raw.tokens || raw) as Record<string, unknown>;
   if (typeof tokens.access_token !== 'string') throw new Error('Codex access_token is missing');
@@ -60,12 +60,24 @@ export function codexUserId(accessToken: string, idToken?: string): string | nul
   return null;
 }
 
-async function claudeProfile(accessToken: string): Promise<{ id: string; label: string }> {
+// Labels stay the email for a personal plan; an organization seat gets its kind
+// appended so a personal plan and a Team seat under one email can be told apart.
+const ORG_KINDS: Record<string, string> = { claude_team: 'Team', claude_enterprise: 'Enterprise' };
+
+async function claudeProfile(accessToken: string): Promise<{ id: string; label: string; organizationId: string | null }> {
   const response = await fetch('https://api.anthropic.com/api/oauth/profile', { headers: { authorization: `Bearer ${accessToken}`, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`Claude profile failed (${response.status})`);
-  const value = await response.json() as { account?: { uuid?: string; email?: string } };
+  const value = await response.json() as { account?: { uuid?: string; email?: string }; organization?: { uuid?: string; organization_type?: string } };
   if (!value.account?.uuid) throw new Error('Claude account UUID is missing');
-  return { id: value.account.uuid, label: value.account.email || value.account.uuid };
+  const kind = ORG_KINDS[value.organization?.organization_type ?? ''];
+  const label = value.account.email || value.account.uuid;
+  return { id: value.account.uuid, label: kind ? `${label} (${kind})` : label, organizationId: value.organization?.uuid ?? null };
+}
+
+// The organization a stored Claude token belongs to, for records saved before
+// the organization was kept. Null when the token can no longer say.
+export async function claudeOrganization(accessToken: string): Promise<string | null> {
+  try { return (await claudeProfile(accessToken)).organizationId; } catch { return null; }
 }
 
 export async function loginClaude(): Promise<{ label: string; credential: OAuthCredential }> {
@@ -83,7 +95,7 @@ export async function loginClaude(): Promise<{ label: string; credential: OAuthC
   const response = await fetch('https://platform.claude.com/v1/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: authorizationCode, state, grant_type: 'authorization_code', client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', redirect_uri: redirect, code_verifier: verifier }) });
   if (!response.ok) throw new Error(`Claude token exchange failed (${response.status})`);
   const tokens = await response.json() as Record<string, unknown>; const accessToken = String(tokens.access_token); const profile = await claudeProfile(accessToken);
-  return { label: profile.label, credential: { accessToken, refreshToken: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : null, expiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000, accountId: profile.id } };
+  return { label: profile.label, credential: { accessToken, refreshToken: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : null, expiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000, accountId: profile.id, ...(profile.organizationId ? { organizationId: profile.organizationId } : {}) } };
 }
 
 export async function loginCodex(): Promise<{ label: string; credential: OAuthCredential }> {

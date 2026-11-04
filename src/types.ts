@@ -19,6 +19,10 @@ export interface OAuthCredential {
   // workspace and is what the chatgpt-account-id header needs, but every member
   // of a Business/Team workspace shares it, so it cannot tell two members apart.
   userId?: string;
+  // Claude only: the organization the token is scoped to. accountId names the
+  // person, but one email can hold a personal plan and a Team seat at once, and
+  // each organization has its own subscription and usage limits.
+  organizationId?: string;
 }
 
 export interface TeamAIConfig {
