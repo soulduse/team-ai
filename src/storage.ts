@@ -294,6 +294,48 @@ export function updateSessions(change: (bindings: StoredSessionBindings, pending
   });
 }
 
+// Removing the last member of a group removes the group itself. Stored
+// sessions must lose that scope as well, including registrations that have
+// not made their first request yet; otherwise a later request would refer to
+// a group that no longer exists. This is kept separate from updateSessions so
+// normal session binding cannot change a group's identity.
+export function clearSessionGroups(names: ReadonlySet<string>): Promise<boolean> {
+  if (!names.size) return Promise.resolve(false);
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { bindings, ledger, fresh } = await readSessionStore();
+    if (fresh) return false;
+    let changed = false;
+    for (const [id, binding] of Object.entries(bindings)) {
+      if (binding.group !== undefined && names.has(binding.group)) {
+        delete binding.group;
+        changed = true;
+      }
+      const entry = ledger[id];
+      if (entry && typeof entry === 'object' && names.has(entry.group)) {
+        ledger[id] = entry.state;
+        changed = true;
+      }
+    }
+    for (const [id, entry] of Object.entries(ledger)) {
+      if (typeof entry === 'object' && names.has(entry.group)) {
+        ledger[id] = entry.state;
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+    const validated = validateSessionBindings(bindings);
+    for (const id of Object.keys(validated)) {
+      const entry = ledger[id];
+      if (!entry || ledgerState(entry) !== 'bound') throw new Error('Session ledger and bindings disagree');
+      if (validated[id]!.group !== (typeof entry === 'string' ? undefined : entry.group)) throw new Error('Session group and ledger disagree');
+    }
+    await atomicWrite(ledgerPathFor(path), ledger);
+    await atomicWrite(path, validated);
+    return true;
+  });
+}
+
 // The key a stored account is known by: the account id, plus the user for a
 // Codex workspace that several members share.
 export function accountKey(credential: OAuthCredential): string {
@@ -334,11 +376,32 @@ export async function upsertAccount(provider: ProviderId, label: string, credent
 }
 
 export async function removeAccount(credentialId: string): Promise<boolean> {
+  let removedAccount: StoredAccount | undefined;
+  const removedGroups = new Set<string>();
   const removed = await updateConfig((config) => {
-    const before = config.accounts.length;
+    removedAccount = config.accounts.find((account) => account.credentialId === credentialId);
+    if (!removedAccount) return false;
+    const claudeIds = new Set(config.accounts.filter((account) => account.provider === 'claude').map((account) => account.id));
     config.accounts = config.accounts.filter((account) => account.credentialId !== credentialId);
-    if (config.accounts.length === before) return false;
+    if (removedAccount.provider !== 'claude' || !config.groups || typeof config.groups !== 'object' || Array.isArray(config.groups)) return;
+    const next: Record<string, string[]> = {};
+    for (const [name, members] of Object.entries(config.groups)) {
+      if (!Array.isArray(members)) { next[name] = members as string[]; continue; }
+      const remaining = members.filter((ref) => {
+        if (typeof ref !== 'string') return true;
+        // parseGroups gives an exact id precedence over a label. Keep that
+        // rule here so a removed label cannot accidentally remove another
+        // account whose id happens to use the same text.
+        return claudeIds.has(ref) ? ref !== removedAccount!.id : ref !== removedAccount!.label;
+      });
+      if (remaining.length) next[name] = remaining;
+      else removedGroups.add(name);
+    }
+    config.groups = Object.keys(next).length ? next : undefined;
   });
-  if (removed) await updateCredentials((current) => { delete current[credentialId]; });
+  if (removed) {
+    if (removedGroups.size) await clearSessionGroups(removedGroups);
+    await updateCredentials((current) => { delete current[credentialId]; });
+  }
   return removed;
 }
