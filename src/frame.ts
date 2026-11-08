@@ -8,6 +8,7 @@ import { hostText, type HostSample } from './host-metrics.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage, type ExternalWindow } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, parseBalance, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
+import { groupEditorFooter, groupEditorLines, type GroupEditor } from './group-editor.js';
 import { groupStatuses, parseGroups } from './groups.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
@@ -281,7 +282,7 @@ function externalBox(usage: ExternalUsage, width: number, gauge: number): Array<
   return out;
 }
 
-export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits' | 'routes' | 'help';
+export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits' | 'routes' | 'groups' | 'help';
 
 // The reset-credit picker ('t' on a Codex row): the tickets on one account and
 // where the operator is in choosing and confirming one.
@@ -325,6 +326,7 @@ export interface FrameView {
   sortByHeadroom: boolean;
   credits?: CreditPicker;
   routes?: RouteEditor;
+  groups?: GroupEditor;
   // This PC's CPU and RAM load, sampled by the caller on each redraw. Absent:
   // the header has no host field at all.
   host?: HostSample | null;
@@ -372,7 +374,7 @@ function packHints(hints: string[], width: number): string[] {
 // The '?' list: every key, in either layout.
 function helpLines(keys: string[], width: number): string[] {
   const title = ' Keys ';
-  const body = packHints([...keys, '? this list'], Math.max(1, width - 2))
+  const body = packHints([...keys, 'G groups', '? this list'], Math.max(1, width - 2))
     .map((line) => color(36, `│${fit(line, Math.max(0, width - 2))}│`));
   return [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`), ...body, color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`)];
 }
@@ -467,6 +469,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   }
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
+  if (mode === 'groups' && view.groups) lines.push(...groupEditorLines(view.groups, width));
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
   if (mode === 'help') lines.push(...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
@@ -490,7 +493,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
 
 function modeFooter(view: FrameView, codexSelected: boolean): string {
   const { mode } = view;
-  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'normal' ? ` ${normalKeys(codexSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ←→ rank -/+   ↑↓ select   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
+  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'groups' && view.groups ? groupEditorFooter(view.groups) : mode === 'normal' ? ` ${normalKeys(codexSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ←→ rank -/+   ↑↓ select   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
     : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
     : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
 }
@@ -638,6 +641,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
   if (mode === 'credits' && view.credits) push(RANK.overlay, ...pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) push(RANK.overlay, ...routeEditorLines(view.routes, width));
+  if (mode === 'groups' && view.groups) push(RANK.overlay, ...groupEditorLines(view.groups, width));
   if (mode === 'help') push(RANK.overlay, ...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
 
   // Other agents: one line per usage group under one rule, a provider's

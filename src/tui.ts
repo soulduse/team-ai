@@ -6,8 +6,9 @@ import { buildFrame, displayOrder, frozenOrder, navigationOrder, orderOptions, E
 import { createHostTracker } from './host-metrics.js';
 import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
+import { groupEditorKey, openGroupEditor, type GroupEditor } from './group-editor.js';
 import { liveState } from './runtime.js';
-import { loadConfig, loadState, removeAccount, updateConfig, upsertAccount } from './storage.js';
+import { clearSessionGroups, loadConfig, loadSessions, loadState, removeAccount, renameSessionGroup, updateConfig, upsertAccount } from './storage.js';
 import type { ResetCredit, StoredAccount } from './types.js';
 
 export async function runTui(): Promise<void> {
@@ -19,6 +20,7 @@ export async function runTui(): Promise<void> {
   let sortByHeadroom = true;
   let credits: CreditPicker | undefined; let creditList: ResetCredit[] = []; let creditAccount: string | null = null;
   let routeEditor: RouteEditor | undefined;
+  let groupEditor: GroupEditor | undefined;
   // The roster captured when priority mode opened. While it is set, rows are
   // drawn and walked in that order, so saving a rank does not move the row
   // under the cursor; leaving the mode clears it and the next frame sorts again.
@@ -31,7 +33,7 @@ export async function runTui(): Promise<void> {
   const host = createHostTracker();
   const screen = startScreen(process.stdout, async ({ width, height }) => {
     const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(navigationOrder(config, frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config)))); if (current && !selectedId) selectedId = current.credentialId;
-    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, frozen: frozen ?? undefined, credits, routes: routeEditor, host: host.sample() });
+    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, frozen: frozen ?? undefined, credits, routes: routeEditor, groups: groupEditor, host: host.sample() });
   });
   const render = (): Promise<void> => screen.render();
 
@@ -120,6 +122,15 @@ export async function runTui(): Promise<void> {
     finally { busy = false; }
     if (!routeEditor) mode = 'normal';
   };
+  const openGroups = async (): Promise<void> => { const config = await loadConfig(); groupEditor = openGroupEditor(config); const selectedIndex = groupEditor.accounts.findIndex((account) => account.credentialId === selectedId); if (selectedIndex >= 0) groupEditor.accountIndex = selectedIndex; mode = 'groups'; };
+  const groupKey = async (key: string): Promise<void> => {
+    const current = groupEditor; if (!current) return;
+    try {
+      groupEditor = await pressGroupKey(current, key, async (pending) => { groupEditor = pending; busy = true; await render(); }, async (notice) => { await apply(notice); });
+    } catch (error) { groupEditor = { ...current, error: (error as Error).message }; }
+    finally { busy = false; }
+    if (!groupEditor) mode = 'normal';
+  };
 
   const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude({ interactive: false }) : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; await apply(`Added ${account.label}`); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
 
@@ -128,6 +139,7 @@ export async function runTui(): Promise<void> {
     if (busy) return; message = '';
     if (key === '' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
     if (mode === 'routes' && routeEditor) await routeKey(key);
+    else if (mode === 'groups' && groupEditor) await groupKey(key);
     else if (key === '\x1b' || mode === 'help') { if (mode === 'order') frozen = null; mode = 'normal'; credits = undefined; }
     else if (mode === 'credits' && credits) {
       if (credits.phase === 'pick' && credits.items.length) {
@@ -147,7 +159,7 @@ export async function runTui(): Promise<void> {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
-      else if (key === 'o') { const config = await loadConfig(); frozen = displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)).map((account) => account.credentialId); mode = 'order'; } else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
+      else if (key === 'o') { const config = await loadConfig(); frozen = displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)).map((account) => account.credentialId); mode = 'order'; } else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'G') { await openGroups(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();
@@ -199,6 +211,25 @@ export async function pressRouteKey(editor: RouteEditor, key: string, onSaving: 
     const reopened = openRouteEditor(await loadConfig(), save.provider, save.focus, `${save.notice} — ${describeReload(outcome)}`);
     return outcome.status === 'failed' ? { ...reopened, notice: undefined, warning: `${save.notice}: ${describeReload(outcome)}` } : reopened;
   } catch (error) { return { ...result.editor, phase: result.editor.phase === 'delete' ? 'list' : result.editor.phase, error: (error as Error).message }; }
+}
+
+// One group-editor key, including the atomic config write and live apply. The
+// hooks keep the screen testable without a terminal or a running relay.
+export async function pressGroupKey(editor: GroupEditor, key: string, onSaving: (editor: GroupEditor) => Promise<void> = async () => {}, applyChange: (notice: string) => Promise<void> = async () => {}): Promise<GroupEditor | undefined> {
+  const result = groupEditorKey(editor, key);
+  if (result.close) return undefined;
+  if (!result.save) return result.editor;
+  const save = result.save; await onSaving(result.editor);
+  if (save.session?.type === 'remove-members') {
+    const sessions = await loadSessions();
+    const blocked = save.session.removals.find((removal) => Object.values(sessions).some((binding) => binding.provider === 'claude' && binding.group === removal.group && binding.accountId === removal.accountId));
+    if (blocked) return { ...editor, error: `Cannot remove ${blocked.accountId} from ${blocked.group}: a bound Claude session still uses this account` };
+  }
+  await updateConfig((config) => { config.groups = Object.keys(save.groups).length ? save.groups : {}; });
+  if (save.session?.type === 'delete') await clearSessionGroups(new Set([save.session.name]));
+  if (save.session?.type === 'rename') await renameSessionGroup(save.session.from, save.session.to);
+  await applyChange(save.notice);
+  return openGroupEditor(await loadConfig(), save.focus, save.notice);
 }
 
 // Priority mode ('o'). ←/→ (or h/l) take the selected account's priority one

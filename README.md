@@ -293,6 +293,8 @@ After editing groups, restart the relay or apply a config reload through an acco
 
 In both dashboard layouts, configured groups divide the Claude account box into sections in configuration order, with ready counts and headroom in each heading. Accounts keep the current quota/config sort within each section; accounts outside every group appear last under `그룹 없음` (Ungrouped). A shared account appears in every group with `↔` before its name. Selection highlights all copies, while ↑/↓ visits each account once in order of its first appearance; actions affect that single account. Priority mode freezes the order within each section until it closes. Without groups, the dashboard is unchanged.
 
+**Editing groups in the dashboard.** Press `G` to open the Claude group editor. `a` creates a group (the same name and non-empty membership rules as `config.json`), `e`/`Enter` renames the selected group, and `d` deletes it after `y`/`Enter` confirmation. `m`/`Space` opens its membership list; use ↑/↓ and `Space` to add or remove accounts, then `Enter` to finish. A group cannot be left empty, and Codex accounts are shown but refused with an explanation. If a recorded Claude session is pinned to an account in that group, removing that account is refused so the session keeps its permanent account binding; delete the group only when you intend to clear that session's group scope. Group deletion and renaming update the stored session records under their lock. `Esc` cancels the current edit. Every accepted change updates only `groups` in `config.json` and applies it through the same live reload path as other dashboard settings.
+
 ## Configuration
 
 Configuration and credentials live in `$TEAMAI_HOME`, falling back to

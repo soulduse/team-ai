@@ -336,6 +336,38 @@ export function clearSessionGroups(names: ReadonlySet<string>): Promise<boolean>
   });
 }
 
+// Rename a configured Claude group in every pending registration and bound
+// session. The binding and ledger are rewritten under the same sessions lock so
+// a request can never observe the old name in one file and the new name in the
+// other. This is deliberately separate from updateSessions, which forbids
+// changing a registered session's group during normal request binding.
+export function renameSessionGroup(from: string, to: string): Promise<boolean> {
+  if (from === to) return Promise.resolve(false);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(from) || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(to) || ['__proto__', 'constructor', 'prototype'].includes(from) || ['__proto__', 'constructor', 'prototype'].includes(to)) throw new Error('Invalid session group name');
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { bindings, ledger, fresh } = await readSessionStore();
+    if (fresh) return false;
+    let changed = false;
+    for (const binding of Object.values(bindings)) {
+      if (binding.group === from) { binding.group = to; changed = true; }
+    }
+    for (const [id, entry] of Object.entries(ledger)) {
+      if (typeof entry === 'object' && entry.group === from) { ledger[id] = { state: entry.state, group: to }; changed = true; }
+    }
+    if (!changed) return false;
+    const validated = validateSessionBindings(bindings);
+    for (const id of Object.keys(validated)) {
+      const entry = ledger[id];
+      if (!entry || ledgerState(entry) !== 'bound') throw new Error('Session ledger and bindings disagree');
+      if (validated[id]!.group !== (typeof entry === 'string' ? undefined : entry.group)) throw new Error('Session group and ledger disagree');
+    }
+    await atomicWrite(ledgerPathFor(path), ledger);
+    await atomicWrite(path, validated);
+    return true;
+  });
+}
+
 // The key a stored account is known by: the account id, plus the user for a
 // Codex workspace that several members share.
 export function accountKey(credential: OAuthCredential): string {
