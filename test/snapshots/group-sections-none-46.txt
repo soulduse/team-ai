@@ -1,9 +1,9 @@
  TeamAI
-─ Claude 4 ────────   5h     7d     F    reset
-  charlie            100%   100%    -
-> bravo              50%    50%     -
- ►alpha              25%    25%     -
-  미지정             10%    10%     -
+─ Claude 4 ────────       5h       7d        F
+  charlie               100%     100%        -
+> bravo                  50%      50%        -
+ ►alpha                  25%      25%        -
+  미지정                 10%      10%        -
 ─ Codex 1 ────────────────────────────────────
   codex             no quota data yet
 ─ Activity ───────────────────────────────────

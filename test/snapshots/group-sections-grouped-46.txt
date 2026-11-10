@@ -1,13 +1,13 @@
  TeamAI
-─ Claude 4 ────────   5h     7d     F    reset
+─ Claude 4 ────────       5h       7d        F
   master · 2/2 ready · headroom 1.25
-> ↔ bravo            50%    50%     -
- ►alpha              25%    25%     -
+> ↔ bravo                50%      50%        -
+ ►alpha                  25%      25%        -
   worker · 1/2 ready · headroom 0.50
-  charlie            100%   100%    -
-> ↔ bravo            50%    50%     -
+  charlie               100%     100%        -
+> ↔ bravo                50%      50%        -
   그룹 없음
-  미지정             10%    10%     -
+  미지정                 10%      10%        -
 ─ Codex 1 ────────────────────────────────────
   codex             no quota data yet
 ─ Activity ───────────────────────────────────

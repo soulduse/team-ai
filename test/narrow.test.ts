@@ -7,7 +7,7 @@ import { config, state } from './narrow-fixture.js';
 
 // The dashboard on a phone: the same terminal seen 40–60 columns wide. Every
 // frame here is drawn from synthetic data (narrow-fixture.ts).
-const WIDTHS = [40, 46, 60, 80, 120, 160];
+const WIDTHS = [40, 46, 56, 60, 72, 80, 120, 160];
 const view = (width: number, extra: Partial<FrameView> = {}): FrameView => ({ width, selectedId: 'cred-alice.long.address@example.com', mode: 'normal', message: '', sortByHeadroom: true, ...extra });
 const frame = (width: number, extra: Partial<FrameView> = {}): string[] => buildFrame(config, state, view(width, extra));
 const plain = (lines: string[]): string[] => lines.map(stripAnsi);
@@ -38,30 +38,108 @@ test('the narrow layout starts below the width the wide grid needs', () => {
   assert.ok(!plain(frame(79)).some((text) => text.includes('┌─ Claude accounts')), 'no wide boxes at 79');
 });
 
-test('the narrow layout gives every provider its current account and its 5h and 7d figures on one line', () => {
+test('the narrow layout gives each account its figures, with every window\'s reset on the line below', () => {
   for (const width of [40, 46, 60]) {
-    const lines = frame(width, { height: 30 });
+    const lines = frame(width, { height: 40 });
+    const text = plain(lines);
     // Claude: the window names are on the section rule; alice is where the
-    // next request goes and is selected. The row itself only carries figures.
-    assert.match(line(lines, '─ Claude'), /5h +7d +F +reset/, `width ${width}: Claude's column names once`);
-    const alice = line(lines, 'alice');
-    assert.match(alice, /^>►/, `width ${width}: cursor and ► on the current account`);
-    assert.match(alice, /62% +84% +35%/);
-    assert.match(alice, /3d/, `width ${width}: when the most-spent window resets`);
+    // next request goes and is selected. The row itself only carries figures,
+    // and the line below carries each window's own reset time.
+    assert.match(line(lines, '─ Claude'), /5h +7d +F/, `width ${width}: Claude's column names once`);
+    assert.match(line(lines, '─ Codex'), /5h +7d/, `width ${width}: Codex's column names once`);
+    assert.match(line(lines, '─ Other'), /5h +7d +30d/, `width ${width}: other agents' column names once`);
+    assert.ok(!text.some((row) => /\breset\b/.test(row)), `width ${width}: no reset column or label`);
+    const alice = text.findIndex((row) => row.includes('alice'));
+    assert.match(text[alice]!, /^>►/, `width ${width}: cursor and ► on the current account`);
+    assert.match(text[alice]!, /62% +84% +35%/);
+    const aliceReset = text[alice + 1]!;
+    assert.match(aliceReset, /2h10m/);
+    assert.equal(aliceReset.match(/3d/g)?.length, 2, `width ${width}: weekly and Fable resets both under their gauges`);
     // Codex: d1fp9a is current and has only a weekly window.
-    assert.match(line(lines, '─ Codex'), /5h +7d +reset/, `width ${width}: Codex's column names once`);
-    const current = line(lines, 'd1fp9a@');
-    assert.match(current, /^ ►/); assert.match(current, /10%/);
+    const d1 = text.findIndex((row) => row.includes('d1fp9a@'));
+    assert.match(text[d1]!, /^ ►/); assert.match(text[d1]!, /10%/);
+    assert.match(text[d1 + 1]!, /6d/);
     assert.match(line(lines, 'carol@'), /30% +75%/);
+    assert.match(text[text.findIndex((row) => row.includes('carol@')) + 1]!, /2h +4d/);
     // The other agents share one rule and the same aligned cells.
-    assert.match(line(lines, '─ Other'), /5h +7d +30d +reset/, `width ${width}: other agents' column names once`);
     assert.match(line(lines, 'Gemini'), /20% +55%/);
     assert.match(line(lines, 'Grok'), /25%/);
     assert.match(line(lines, 'OpenCode'), /5% +33% +71%/);
     // No account or group row repeats a window name beside its figure.
-    const rows = plain(lines).filter((text) => /alice|김철수|off@|carol@|d1fp9a|Gemini|OpenCode|Grok/.test(text) && !text.startsWith('─'));
+    const rows = text.filter((row) => /alice|김철수|off@|carol@|d1fp9a|Gemini|OpenCode|Grok/.test(row) && !row.startsWith('─'));
     for (const row of rows) assert.doesNotMatch(row, /\b(?:5h|7d|30d|F)\b/, `width ${width}: no repeated window name: ${row}`);
   }
+});
+
+test('each reset time ends in the same column as its window figure and the header name', () => {
+  for (const width of [40, 46, 56, 72]) {
+    const text = plain(frame(width, { height: 40 }));
+    // End columns (1-based, terminal cells) of a list of strings, found in
+    // order. A wide (two-cell) Korean name before them must not shift these.
+    const ends = (line: string, needles: string[]): number[] => {
+      let from = 0;
+      return needles.map((needle) => { const at = line.indexOf(needle, from); from = at + needle.length; return cellWidth(line.slice(0, at + needle.length)); });
+    };
+    const at = (needle: string): number => text.findIndex((line) => line.includes(needle));
+    // The fixture keeps every reset under the window it belongs to. The
+    // header names are compared too, so a figure and its reset must end in the
+    // same column as the window name above them.
+    const rows: Array<{ name: string; header: string; labels: string[]; figures: string[]; resets: string[] }> = [
+      { name: '김철수', header: '─ Claude', labels: ['5h', '7d', 'F'], figures: ['93%', '20%', '10%'], resets: ['1h', '5d', '5d'] },
+      { name: 'alice', header: '─ Claude', labels: ['5h', '7d', 'F'], figures: ['62%', '84%', '35%'], resets: ['2h10m', '3d', '3d'] },
+      { name: 'carol@', header: '─ Codex', labels: ['5h', '7d'], figures: ['30%', '75%'], resets: ['2h', '4d'] },
+      { name: 'd1fp9a', header: '─ Codex', labels: ['5h', '7d'], figures: ['10%'], resets: ['6d'] },
+      { name: 'Gemini', header: '─ Other', labels: ['5h', '7d'], figures: ['20%', '55%'], resets: ['3d8h', '3d8h'] },
+      { name: 'Grok', header: '─ Other', labels: ['5h', '7d'], figures: ['25%'], resets: ['3d8h'] },
+      { name: 'OpenCode', header: '─ Other', labels: ['5h', '7d', '30d'], figures: ['5%', '33%', '71%'], resets: ['3d8h', '3d8h', '3d8h'] },
+    ];
+    for (const row of rows) {
+      const index = at(row.name);
+      const figureEnds = ends(text[index]!, row.figures);
+      const resetEnds = ends(text[index + 1]!, row.resets);
+      const headerEnds = ends(text[at(row.header)]!, row.labels);
+      assert.deepEqual(resetEnds, figureEnds, `${width} ${row.name}: each reset ends under its figure`);
+      for (const end of figureEnds) assert.ok(headerEnds.includes(end), `${width} ${row.name}: the figure ends under its header name (${end} not in ${headerEnds})`);
+      assert.doesNotMatch(text[index + 1]!, /…/, `${width} ${row.name}: no reset time is cut`);
+    }
+  }
+});
+
+test('a very narrow gauge shortens the reset time instead of overflowing it', () => {
+  for (const width of [20, 24, 32, 39]) {
+    const text = plain(frame(width, { height: 40 }));
+    const alice = text.findIndex((row) => row.includes('alice'));
+    const reset = text[alice + 1]!;
+    assert.equal(cellWidth(reset.trimEnd()), width, `${width}: the reset line ends at the frame edge`);
+    assert.doesNotMatch(reset, /…/, `${width}: no reset time is cut`);
+  }
+});
+
+test('a window with no reset leaves its cell blank, and an account with none has no second line', () => {
+  for (const width of [40, 46, 56, 72]) {
+    const text = plain(frame(width, { height: 40 }));
+    const at = (needle: string): number => text.findIndex((row) => row.includes(needle));
+    // d1fp9a has only a weekly window: nothing is drawn under the blank 5h gauge.
+    const d1Reset = text[at('d1fp9a@') + 1]!;
+    assert.equal(d1Reset.slice(0, d1Reset.indexOf('6d')).trim(), '', `${width}: blank session window`);
+    // off@example.com has no measured window at all: the next line is the
+    // Codex rule, not a reset line.
+    const off = at('off@');
+    assert.match(text[off]!, /^ {2}off@example\.com/);
+    assert.match(text[off + 1]!, /^─ Codex/, `${width}: no second line for a row with no resets`);
+  }
+});
+
+test('a terminal too short for two lines keeps one line and the reset column', () => {
+  const rule = (height: number): string => plain(frame(46, { height })).find((row) => row.startsWith('─ Claude'))!;
+  const alice = (height: number): string => plain(frame(46, { height })).find((row) => row.includes('alice'))!;
+  // 13 rows cannot hold the account list at two lines plus the header, the
+  // Activity rule and the footer; 14 can.
+  assert.match(rule(13), /5h +7d +F +reset/);
+  assert.match(alice(13), /3d\s*$/, 'the most-spent window\'s reset stays on the row');
+  assert.equal(plain(frame(46, { height: 13 }))[plain(frame(46, { height: 13 })).findIndex((row) => row.includes('alice')) + 1]!.includes('3d'), false, 'no separate reset line');
+  assert.match(rule(14), /5h +7d +F/);
+  assert.doesNotMatch(rule(14), /reset/);
 });
 
 test('narrow rows put every provider\'s figures in the same columns', () => {
@@ -121,7 +199,7 @@ test('the activity log shortens an address that does not fit to its local part, 
 
 test('the activity log takes the rows that are left', () => {
   const count = (lines: string[]): number => lines.filter((text) => /^.\d\d:\d\d /.test(text)).length;
-  assert.equal(count(plain(frame(46, { height: 24 }))), 5, 'all five entries in 24 rows');
+  assert.equal(count(plain(frame(46, { height: 30 }))), 5, 'all five entries in 30 rows, with the second lines');
   const short = count(plain(frame(46, { height: 14 })));
   assert.ok(short < 5 && short >= 1, `a 14-row terminal keeps some activity: ${short}`);
 });
@@ -157,7 +235,7 @@ test('the narrow footer is one line of the keys that fit, the rest behind ?', ()
 });
 
 test('a mode footer too long for the line keeps every hint on screen above it', () => {
-  const lines = plain(frame(46, { height: 30, mode: 'routes', routes: openRouteEditor(config, 'claude') }));
+  const lines = plain(frame(46, { height: 40, mode: 'routes', routes: openRouteEditor(config, 'claude') }));
   const all = lines.join('\n');
   for (const hint of ['a add', 'e/Enter edit', 'd delete', 'Tab Claude/Codex', 'Esc close']) assert.ok(all.includes(hint), `route editor hint ${hint}`);
 });
