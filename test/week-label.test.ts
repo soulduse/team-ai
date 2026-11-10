@@ -38,13 +38,15 @@ test('no other spelling of a week is left in the frame at 40, 60, 80 and 120 col
   }
 });
 
-test('a week stored without a length is titled 7d in the wide boxes and the narrow rows', () => {
+test('a week stored without a length is titled 7d in the wide boxes and the narrow section rules', () => {
   const wide = frame(legacy, 120);
   const header = (title: string): string => wide[wide.findIndex((line) => line.includes(`─ ${title}`)) + 1]!;
   assert.match(header('Grok'), /\b7d\b/); assert.match(header('OpenCode Go'), /\b7d\b/);
   const narrow = frame(legacy, 60);
-  assert.match(narrow.find((line) => line.includes('Grok'))!, /7d +25%/);
-  assert.match(narrow.find((line) => line.includes('OpenCode'))!, /7d +33%/);
+  const rule = narrow.find((line) => line.startsWith('─ Other agents'))!;
+  assert.match(rule, /\b7d\b/);
+  assert.match(narrow.find((line) => line.includes('Grok'))!, /25%/);
+  assert.match(narrow.find((line) => line.includes('OpenCode'))!, /33%/);
 });
 
 test('the shorter titles keep the wide columns and the narrow figures aligned', () => {
@@ -59,9 +61,13 @@ test('the shorter titles keep the wide columns and the narrow figures aligned', 
   }
   for (const width of [40, 60]) {
     const lines = frame(state, width);
-    const column = (needle: string): number => { const line = lines.find((l) => l.includes(needle))!; return cellWidth(line.slice(0, line.search(/7d +\d+%/))); };
+    const column = (needle: string, figure: string): number => {
+      const text = lines.find((line) => line.includes(needle))!; const at = text.indexOf(figure);
+      assert.ok(at >= 0, `width ${width}: ${needle} shows ${figure}`);
+      return cellWidth(text.slice(0, at + figure.length));
+    };
     // alice (Claude 7d), carol (Codex 7d) and Gemini (Antigravity 7d) share the second cell.
-    assert.equal(column('alice'), column('carol@'), `width ${width}`);
-    assert.equal(column('alice'), column('Gemini'), `width ${width}`);
+    assert.equal(column('alice', '84%'), column('carol@', '75%'), `width ${width}`);
+    assert.equal(column('alice', '84%'), column('Gemini', '55%'), `width ${width}`);
   }
 });

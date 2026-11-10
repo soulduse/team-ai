@@ -1,10 +1,10 @@
  TeamAI
-─ Claude 4 ───────────────────────────────────
-  charlie        5h 100% 7d 100%  F    -
-> bravo          5h  50% 7d  50%  F    -
- ►alpha          5h  25% 7d  25%  F    -
-  미지정         5h  10% 7d  10%  F    -
+─ Claude 4 ────────   5h     7d     F    reset
+  charlie            100%   100%    -
+> bravo              50%    50%     -
+ ►alpha              25%    25%     -
+  미지정             10%    10%     -
 ─ Codex 1 ────────────────────────────────────
-  codex          no quota data yet
+  codex             no quota data yet
 ─ Activity ───────────────────────────────────
- ↑↓ select  s switch  e enable  q quit  ? help
+ ↑↓ sel  s switch  e enable  q quit  ? help

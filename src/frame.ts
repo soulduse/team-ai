@@ -509,31 +509,38 @@ function modeFooter(view: FrameView, codexSelected: boolean): string {
 export const NARROW_WIDTH = 80;
 export const isNarrow = (width: number, marks = 0): boolean => width < Math.max(NARROW_WIDTH, usageLayout(0, marks).tail - 1);
 
-// One quota window on a narrow row: its short name, how much is spent, and
-// when it resets.
-interface Reading { label: string; usage: number | null | undefined; resetsAt: number | null | undefined }
+// One quota window on a narrow row: how much is spent and when it resets. The
+// window's name is drawn once in the section rule above, not on every row.
+interface Reading { usage: number | null | undefined; resetsAt: number | null | undefined }
 interface NarrowRow { lead: string; name: string; tint?: number; cells: Array<Reading | undefined>; note?: string }
-interface NarrowLayout { name: number; label: number; gauge: number; cells: number; reset: boolean }
+// A section rule that doubles as the column header: the window names sit on
+// the right of the rule, over the figures, so the section costs no extra row.
+interface NarrowRule { title: string; short?: string; labels: string[] }
+interface NarrowLayout { name: number; gauge: number; cells: number; reset: boolean }
 const RESET_WIDTH = 5;
 // A reset time in at most five columns: 59m, 2h10m, 23h, 3d8h, 13d.
 function shortDuration(reset: number | null | undefined): string {
   const text = duration(reset); return text.length <= RESET_WIDTH ? text : text.replace(/^(\d+[hd]).*$/, '$1');
 }
 
-// The richest row that still leaves the name 10 columns: short gauges, then
-// numbers only, then the third window (Claude's Fable week, a 30-day limit)
-// goes, then the reset time. Below that the name takes what is left. One
-// layout for the whole frame, so every panel's numbers line up.
-function narrowLayout(width: number, label: number, needed: number): NarrowLayout {
-  const cellWidth = (gauge: number): number => 1 + label + 1 + Math.max(4, gauge);
-  const tries: Array<[number, number, boolean]> = [[8, 3, true], [6, 3, true], [0, 3, true], [0, 2, true], [0, 2, false]];
+// The richest row that still leaves the name 14 columns. The old table spent
+// 1+label+1 on every cell; with the names moved to the section rule that
+// width goes to the gauges and the name instead, so 40 columns now draws three
+// bars where the repeated labels used to force two bare percentages, and the
+// account label keeps more of itself at the same time. The third window
+// (Claude's Fable week, a 30-day limit) goes before the reset time, then the
+// name takes what is left. One layout for the whole frame, so every panel's
+// numbers line up.
+function narrowLayout(width: number, needed: number): NarrowLayout {
+  const cellWidth = (gauge: number): number => 1 + Math.max(4, gauge);
+  const tries: Array<[number, number, boolean]> = [[10, 3, true], [8, 3, true], [6, 3, true], [4, 3, true], [0, 3, true], [0, 2, true], [0, 2, false]];
   for (const [gauge, cells, reset] of tries) {
     const shown = Math.min(cells, needed);
     const name = width - 2 - shown * cellWidth(gauge) - (reset ? 1 + RESET_WIDTH : 0);
-    if (name >= 10) return { name, label, gauge, cells: shown, reset };
+    if (name >= 14) return { name, gauge, cells: shown, reset };
   }
   const cells = Math.min(2, needed);
-  return { name: Math.max(1, width - 2 - cells * cellWidth(0)), label, gauge: 0, cells, reset: false };
+  return { name: Math.max(1, width - 2 - cells * cellWidth(0)), gauge: 0, cells, reset: false };
 }
 
 function narrowValue(reading: Reading, gauge: number): string {
@@ -544,16 +551,14 @@ function narrowValue(reading: Reading, gauge: number): string {
 }
 
 function narrowRow(layout: NarrowLayout, row: NarrowRow): string {
+  const field = Math.max(4, layout.gauge);
   let out = `${fit(row.lead, 2)}${fit(row.tint ? color(row.tint, row.name) : row.name, layout.name)}`;
-  const span = layout.cells * (1 + layout.label + 1 + Math.max(4, layout.gauge)) + (layout.reset ? 1 + RESET_WIDTH : 0);
+  const span = layout.cells * (1 + field) + (layout.reset ? 1 + RESET_WIDTH : 0);
   if (row.note) return `${out} ${fit(color(90, row.note), span - 1)}`;
   const shown = row.cells.slice(0, layout.cells);
-  // Name and figure together, right-aligned, so the % signs line up.
-  for (const reading of shown) {
-    const cell = reading ? `${reading.label.slice(0, layout.label)} ${narrowValue(reading, layout.gauge)}` : '';
-    out += ` ${' '.repeat(Math.max(0, layout.label + 1 + Math.max(4, layout.gauge) - visible(cell)))}${cell}`;
-  }
-  out += ' '.repeat(Math.max(0, layout.cells - shown.length) * (1 + layout.label + 1 + Math.max(4, layout.gauge)));
+  // One field per gauge, right-aligned, so the % signs line up.
+  for (const reading of shown) out += reading ? ` ${narrowValue(reading, layout.gauge)}` : ' '.repeat(1 + field);
+  out += ' '.repeat(Math.max(0, layout.cells - shown.length) * (1 + field));
   if (layout.reset) {
     // The reset that matters is the most-spent window's: that is when the
     // account gets room back.
@@ -565,6 +570,30 @@ function narrowRow(layout: NarrowLayout, row: NarrowRow): string {
 }
 
 const rule = (title: string, width: number): string => { const head = visible(`─ ${title} `) > width ? fit(`─ ${title} `, width) : `─ ${title} `; return color(36, `${head}${'─'.repeat(Math.max(0, width - visible(head)))}`); };
+
+function center(text: string, width: number): string {
+  const label = text.slice(0, width); const pad = Math.max(0, Math.floor((width - visible(label)) / 2));
+  return fit(`${' '.repeat(pad)}${label}`, width);
+}
+
+// The section rule doubles as the column header. Its left side stays the name
+// and count a person scans for; the window names sit at the same columns as
+// the gauges below, written once per section instead of on every account row.
+function narrowRule(layout: NarrowLayout, marker: NarrowRule, width: number): string {
+  const field = Math.max(4, layout.gauge);
+  const prefix = 2 + layout.name;
+  const labels = marker.labels.slice(0, layout.cells);
+  if (!labels.some(Boolean)) return rule(marker.title, width);
+  const head = (title: string): string => `─ ${title} `;
+  let title = marker.title;
+  if (visible(head(title)) > prefix) title = marker.short ?? title;
+  if (visible(head(title)) > prefix) return rule(marker.title, width);
+  let out = color(36, `${head(title)}${'─'.repeat(Math.max(0, prefix - visible(head(title))))}`);
+  for (let i = 0; i < layout.cells; i++) out += color(90, ` ${center(labels[i] ?? '', field)}`);
+  if (layout.reset) out += color(90, ` ${fit('reset', RESET_WIDTH)}`);
+  return fit(out, width);
+}
+
 const hhmm = (at: number): string => color(90, new Date(at).toLocaleTimeString('en-GB').slice(0, 5));
 
 // One line per request, never wrapped: time, session, provider (C/X),
@@ -575,17 +604,28 @@ function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: 
   const tagged = sessions && [...shownActive, ...shownEvents.map((e) => e.request)].some((r) => r?.sessionId);
   const tag = (id: string | null | undefined): string => tagged ? `${id ? sessionTag(id) : ' '.repeat(6)} ` : '';
   const who = (provider: string): string => provider === 'claude' ? 'C' : provider === 'codex' ? 'X' : provider.slice(0, 1).toUpperCase();
+  // The account column is the last one, so a full address that does not fit
+  // would only lose its domain's tail. Keep the local part instead: it names
+  // the account, while the list above still shows the fuller label.
+  const account = (label: string | null | undefined, room: number): string => {
+    if (!label) return '';
+    if (visible(label) <= room) return label;
+    const at = label.indexOf('@');
+    return at > 0 && visible(label.slice(0, at)) <= room ? label.slice(0, at) : label;
+  };
   const out = shownActive.map((entry) => {
     const seconds = Math.max(0, Math.round((now - entry.startedAt) / 1000));
     const elapsed = (seconds < 100 ? `${seconds}s` : `${Math.round(seconds / 60)}m`).padStart(3);
-    return fit(`${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.capacityRetries ? color(33, `retry x${entry.capacityRetries} `) : ''}${entry.group ? `[group:${entry.group}] ` : ''}${entry.account ?? ''}`, width);
+    const head = `${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.capacityRetries ? color(33, `retry x${entry.capacityRetries} `) : ''}${entry.group ? `[group:${entry.group}] ` : ''}`;
+    return fit(`${head}${account(entry.account, width - visible(head))}`, width);
   });
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(fit(` ${hhmm(event.at)} ${event.message}`, width)); continue; }
     const failed = typeof request.status !== 'number' || request.status >= 400 || Boolean(request.streamEnd);
     const status = String(request.status).padStart(3);
-    out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.capacityRetries ? color(33, `retry x${request.capacityRetries} `) : ''}${request.group ? `[group:${request.group}] ` : ''}${request.account ?? ''}`, width));
+    const head = ` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.capacityRetries ? color(33, `retry x${request.capacityRetries} `) : ''}${request.group ? `[group:${request.group}] ` : ''}`;
+    out.push(fit(`${head}${account(request.account, width - visible(head))}`, width));
   }
   return out;
 }
@@ -598,23 +638,34 @@ function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: 
 // (then the Activity rule over them, which says nothing on its own), the
 // other agents, and last the rest of the activity log.
 const RANK = { current: 100, provider: 90, message: 80, footer: 70, overlay: 60, account: 50, header: 45, activity: 40, activityTitle: 39, external: 30, log: 20 } as const;
-interface Ranked { text: string | NarrowRow; rank: number; section?: AccountSection; heading?: boolean }
+interface Ranked { text: string | NarrowRow | NarrowRule; rank: number; section?: AccountSection; heading?: boolean }
 
 function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
   const { width, height, selectedId, mode, message, sortByHeadroom } = view;
   const accounts = config.accounts; const ordered = frameOrder(config, state, view);
   const sections = claudeSections(config, ordered); const shared = sharedAccounts(sections);
   const summaries = groupStatuses(config, state);
-  const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow>): void => { for (const text of texts) lines.push({ text, rank }); };
+  const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow | NarrowRule>): void => { for (const text of texts) lines.push({ text, rank }); };
   push(RANK.header, headerLine(color(1, ' TeamAI'), [...withHost(view.host, '', false), ''], width));
 
   for (const provider of ['claude', 'codex'] as const) {
     const group = ordered.filter((account) => account.provider === provider); if (!group.length) continue;
     const next = state.next?.[provider];
+    // The names sit on the section rule instead of on every row. Claude's are
+    // fixed; Codex titles follow the windows actually in play, and disagreeing
+    // spans fall back to a neutral name (the same rule the wide header uses).
+    const labels = provider === 'claude' ? ['5h', '7d', 'F']
+      : Array.from({ length: SLOTS }, (_, slot) => {
+        const spans = new Set(group.flatMap((account) => {
+          const window = codexWindows(state, account)[slot];
+          return window ? [windowLabel(window.minutes, '')] : [];
+        }).filter(Boolean));
+        return spans.size === 1 ? [...spans][0]! : spans.size > 1 ? ['usage', 'limit', 'extra'][slot]! : '';
+      });
     // The ► account is always drawn; with no preview yet, the top row is the
     // best guess. The selected row stays too, so s/e/d act on something seen.
     const current = group.find((account) => account.credentialId === next?.general) ?? group[0]!;
-    push(RANK.provider, rule(`${provider === 'claude' ? 'Claude' : 'Codex'} ${group.length}`, width));
+    push(RANK.provider, { title: `${provider === 'claude' ? 'Claude' : 'Codex'} ${group.length}`, labels });
     const important = new Set<string>();
     for (const section of provider === 'claude' ? sections : [{ accounts: group }]) {
       const title = groupSectionTitle(section, summaries);
@@ -626,8 +677,8 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
         const tint = !account.enabled ? 90 : saved?.error ? 31 : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? 33 : undefined;
         const fable = windows['7d_oi'] || Object.entries(windows).find(([name]) => name.startsWith('7d_'))?.[1];
         const cells: Array<Reading | undefined> = provider === 'claude'
-          ? [{ label: '5h', ...pick(windows['5h']) }, { label: '7d', ...pick(windows['7d']) }, { label: 'F', ...pick(fable) }]
-          : codexWindows(state, account).map((window, slot) => window && { label: windowLabel(window.minutes, ['5h', '7d', '+'][slot]!), usage: window.usage, resetsAt: window.resetsAt });
+          ? [pick(windows['5h']), pick(windows['7d']), pick(fable)]
+          : codexWindows(state, account).map((window) => window && { usage: window.usage, resetsAt: window.resetsAt });
         const row: NarrowRow = provider === 'codex' && !cells.some(Boolean) ? { lead: `${cursor}${arrow}`, name: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, tint, cells, note: 'no quota data yet' } : { lead: `${cursor}${arrow}`, name: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, tint, cells };
         const keep = (account === current || account.credentialId === selectedId) && !important.has(account.credentialId);
         if (keep) important.add(account.credentialId);
@@ -649,22 +700,29 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   // Grok) already say whose they are. A group still showing cached figures
   // after a failed refresh is yellow.
   let externalRank: number = RANK.external; let ruled = false;
-  let otherAgentsRule: Ranked | undefined;
+  let otherAgentsRule: Ranked | undefined; let externalRule: NarrowRule | undefined;
+  const externalRows: Ranked[] = [];
   for (const provider of EXTERNAL_PROVIDERS) {
     const usage = state.external?.[provider]; if (!usage) continue;
     if (!ruled) {
-      otherAgentsRule = { text: rule('Other agents', width), rank: RANK.external };
+      externalRule = { title: 'Other agents', short: 'Others', labels: [] };
+      otherAgentsRule = { text: externalRule, rank: RANK.external };
       lines.push(otherAgentsRule); ruled = true;
     }
     const problem = usage.status === 'ok' ? null
       : usage.status === 'signed-out' ? (usage.note ?? 'not signed in') : usage.status === 'expired' ? (usage.note ?? 'sign-in expired')
       : usage.status === 'unavailable' ? (usage.note ?? 'usage unavailable') : `${usage.note ?? 'error'}`;
-    const rows: NarrowRow[] = usage.groups.map((group) => ({
+    const placed = usage.groups.map((group) => placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1));
+    for (const slots of placed) slots.forEach((window, slot) => {
+      if (window && externalRule && !externalRule.labels[slot]) externalRule.labels[slot] = externalLabel(window);
+    });
+    const rows: NarrowRow[] = usage.groups.map((group, index) => ({
       lead: '  ', name: group.name, tint: problem ? 33 : undefined,
-      cells: placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1).map((w) => w && { label: externalLabel(w), usage: w.usedPercent === null ? null : w.usedPercent / 100, resetsAt: w.resetsAt }),
+      cells: placed[index]!.map((w) => w && { usage: w.usedPercent === null ? null : w.usedPercent / 100, resetsAt: w.resetsAt }),
     }));
     if (!rows.length) rows.push({ lead: '  ', name: EXTERNAL_TITLES[provider], cells: [], note: problem ?? (usage.measuredAt ? 'no usage data' : 'not measured yet') });
-    push(externalRank--, ...rows);
+    const rank = externalRank--;
+    for (const row of rows) { const ranked = { text: row, rank }; externalRows.push(ranked); lines.push(ranked); }
   }
 
   const active = state.active || [];
@@ -677,9 +735,12 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   // Keys: in the normal screen what fits, with '?' for the rest; in any
   // other mode the hints that fit, the rest above the footer.
   // Moving, switching and enabling come first: they are what a glance from
-  // a phone is for.
-  const first = ['↑↓ select', 's switch', 'e enable', 'q quit'];
-  const footerKeys = mode === 'normal' ? [...first, ...normalKeys(codexSelected, sortByHeadroom).filter((key) => !first.includes(key))] : modeFooter(view, codexSelected).trim().split(/\s{2,}/);
+  // a phone is for. Hints are abbreviated so more of them share the line; the
+  // '?' list still spells every key out.
+  const compactKey = (key: string): string => key === '↑↓ select' ? '↑↓ sel' : key === 'd delete' ? 'd del' : key === 'p capture' ? 'p shot' : key.endsWith('-sort') ? key.slice(0, -5) : key;
+  const firstFull = ['↑↓ select', 's switch', 'e enable', 'q quit'];
+  const first = firstFull.map(compactKey);
+  const footerKeys = mode === 'normal' ? [...first, ...normalKeys(codexSelected, sortByHeadroom).filter((key) => !firstFull.includes(key)).map(compactKey)] : modeFooter(view, codexSelected).trim().split(/\s{2,}/);
   const help = mode === 'normal' ? '? help' : '';
   let footer = ''; const left: string[] = [];
   for (const key of footerKeys) {
@@ -711,19 +772,19 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   // The other-agents rule has no meaning without at least one group below it.
   // Height trimming can remove every group while leaving the rule's higher
   // rank behind, so discard that orphan before drawing.
-  if (otherAgentsRule) {
+  if (otherAgentsRule && !externalRows.some((row) => lines.includes(row))) {
     const index = lines.indexOf(otherAgentsRule);
-    if (index >= 0 && (index + 1 >= lines.length || typeof lines[index + 1]!.text === 'string')) lines.splice(index, 1);
+    if (index >= 0) lines.splice(index, 1);
   }
   if (height !== undefined && lines.includes(pad)) lines.splice(lines.indexOf(pad), 1, ...Array.from({ length: height - lines.length + 1 }, () => ({ text: '', rank: 0 })));
   else if (lines.includes(pad)) lines.splice(lines.indexOf(pad), 1);
   if (height !== undefined) while (lines.length < height) lines.splice(Math.max(0, lines.length - 1), 0, { text: '', rank: 0 });
   const rows = lines.map((line) => line.text);
-  const readings = rows.filter((row): row is NarrowRow => typeof row !== 'string' && !row.note);
-  const label = Math.max(2, ...readings.flatMap((row) => row.cells.map((cell) => cell ? Math.min(3, visible(cell.label)) : 0)));
+  const isRule = (row: string | NarrowRow | NarrowRule): row is NarrowRule => typeof row !== 'string' && 'labels' in row;
+  const readings = rows.filter((row): row is NarrowRow => typeof row !== 'string' && !isRule(row) && !row.note);
   const needed = Math.max(1, ...readings.map((row) => row.cells.reduce((last, cell, i) => cell ? i + 1 : last, 0)));
-  const layout = narrowLayout(width, label, needed);
-  const drawn = rows.map((row) => typeof row === 'string' ? row : narrowRow(layout, row));
+  const layout = narrowLayout(width, needed);
+  const drawn = rows.map((row) => typeof row === 'string' ? row : isRule(row) ? narrowRule(layout, row, width) : narrowRow(layout, row));
   return drawn.map((line) => fit(line, width));
 }
 
