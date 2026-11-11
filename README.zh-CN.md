@@ -202,6 +202,8 @@ Codex keep-warm 采用事件驱动。已测量的 5 小时窗口重置 10 秒后
 
 Anthropic 的资料接口会暴露订阅状态和等级，但不提供当前计费周期的结束时间。资料状态会在服务端启动时刷新，此后每六小时刷新一次。
 
+**重置额度 (Codex 与 Claude)。** ChatGPT 和 Anthropic (Claude) 账号可能持有用于重置用量窗口的票据（重置额度，即 Codex CLI 的 `/usage` "Full reset" 或 Claude 用量重置）。开启 `codexResetCredits`（针对 Codex）或 `claudeResetCredits`（针对 Claude，默认关闭）后，当中继因该提供方所有账号均已耗尽配额（而非仅仅繁忙）而无法承接请求时，会自动在符合条件的最优账号上兑换一张票据（票据最多者优先，票数相同时周重置时间最晚者优先），并在该账号上继续提供服务。账号仅在周窗口已满（开启 `codexResetCreditsSessionWindow` / `claudeResetCreditsSessionWindow` 时 5 小时窗口耗尽亦符合条件）、用量接口读出的票据数超过保留数（`codexResetCreditsReserve` / `claudeResetCreditsReserve`）、且距上次尝试已超过冷却时间（`codexResetCreditsCooldownMs` / `claudeResetCreditsCooldownMs`）时才具备资格。单个请求最多消费一张票据。票据无法退还，因此中继绝不会凭猜测消费。Codex 和 Claude 行均会以 `RC<n>` 显示持有票据数，`teamai status` 会按账号列出，在对应行按下 `t` 键可打开选择器手动消费指定票据（按 `y` 确认）。两个提供方默认均关闭（`false`），关闭时绝不会自动发起任何重置额度调用。
+
 ## 配置
 
 配置和凭据存放在 `$TEAMAI_HOME` 中，若未设置则依次回退到 `$XDG_CONFIG_HOME/teamai` 和 `~/.config/teamai`。各代理均绑定在 `127.0.0.1` 上，并要求提供一个自动生成的本地客户端令牌。
@@ -223,6 +225,19 @@ Anthropic 的资料接口会暴露订阅状态和等级，但不提供当前计�
 | `warmup.codex` | `true` | 启用 Codex 账号 keep-warm；`false` 禁用。 |
 | `maxConcurrentPerAccount` | `16` | 每个账号允许的并发在途请求数。设为 `0` 表示无限制。 |
 | `routing.balance` | `"pacing"` | 同一优先级 Claude 账号的排序方式：`pacing`（每周进度，见上文）或 `level`（窗口最空者优先，按 10% 分档）。Codex 始终使用每周节奏。 |
+| `codexResetCredits` | `false` | 自动消费 Codex 重置额度。 |
+| `codexResetCreditsPolicy` | `"fleet"` | `fleet`: 所有 Codex 账号耗尽时。`account`: 账号自身 429 耗尽时亦立即消费。 |
+| `codexResetCreditsCooldownMs` | `1800000` | 同一账号两次尝试之间的最小时间间隔(ms)。 |
+| `codexResetCreditsReserve` | `0` | 自动消费时保留的每个账号最少票据数。 |
+| `codexResetCreditsTimeoutMs` | `10000` | 兑换调用的超时时限(ms)；超时按结果未知处理。 |
+| `codexResetCreditsListRefreshMs` | `600000` | `t` 键显示的票据列表缓存时间(ms)。`0` 表示仅获取一次。 |
+| `codexResetCreditsSessionWindow` | `false` | 仅 5 小时窗口耗尽时亦允许消费票据。 |
+| `claudeResetCredits` | `false` | 自动消费 Claude 重置额度（默认关闭）。 |
+| `claudeResetCreditsCooldownMs` | `1800000` | 同一 Claude 账号两次尝试之间的最小时间间隔(ms)。 |
+| `claudeResetCreditsReserve` | `0` | 自动消费时保留的每个 Claude 账号最少票据数。 |
+| `claudeResetCreditsTimeoutMs` | `10000` | Claude 兑换调用的超时时限(ms)；超时按结果未知处理。 |
+| `claudeResetCreditsListRefreshMs` | `600000` | `t` 键显示的 Claude 票据列表缓存时间(ms)。`0` 表示仅获取一次。 |
+| `claudeResetCreditsSessionWindow` | `false` | 仅 5 小时窗口耗尽时亦允许消费 Claude 票据。 |
 | `routes` | — | 可选。按提供方的模型路由 `{ "claude": [...], "codex": [...] }`，可用仪表盘的 `g` 或 `teamai route` 编辑。 |
 | `proxy.legacyPorts` | — | 可选。按提供方继续应答的额外端口 — 例如 { "claude": [3400] }。 |
 | `proxy.maxBodyMb` | `512` | 可选。中继接受的请求体最大大小(MB)。须为大于 `0` 且不超过 `4096` 的数字，否则启动时报出原因并停止。超出的请求体不发往上游，直接返回 `413` 并只记录大小和上限；上游自己的 `413` 原样转发。 |

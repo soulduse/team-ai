@@ -29,19 +29,31 @@ function findAccount(pool: AccountPool, name: string | null): RuntimeAccount | u
 }
 
 // Returns false when the URL is not one of these routes.
-export async function handleResetCreditControl(req: IncomingMessage, res: ServerResponse, pool: AccountPool | undefined, token: string): Promise<boolean> {
+export async function handleResetCreditControl(req: IncomingMessage, res: ServerResponse, targetPool: AccountPool | AccountPool[] | undefined, token: string): Promise<boolean> {
   const url = new URL(req.url || '/', 'http://localhost');
-  const list = url.pathname === '/codex/reset-credits'; const redeem = url.pathname === '/codex/reset-credit';
-  if (!list && !redeem) return false;
+  const path = url.pathname;
+  let provider: 'codex' | 'claude' | null = null;
+  let isList = false;
+  let isRedeem = false;
+  if (path === '/codex/reset-credits') { provider = 'codex'; isList = true; }
+  else if (path === '/codex/reset-credit') { provider = 'codex'; isRedeem = true; }
+  else if (path === '/claude/reset-credits') { provider = 'claude'; isList = true; }
+  else if (path === '/claude/reset-credit') { provider = 'claude'; isRedeem = true; }
+  if (!provider) return false;
+
   if (!isLoopback(req.socket.remoteAddress)) { send(res, 403, { error: 'local only' }); return true; }
   const given = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
   if (!secureEqual(given, token)) { send(res, 401, { error: 'unauthorized' }); return true; }
-  if (list && req.method !== 'GET') { send(res, 405, { error: 'GET only' }); return true; }
-  if (redeem && req.method !== 'POST') { send(res, 405, { error: 'POST only' }); return true; }
-  if (redeem && await hasBody(req)) { send(res, 400, { error: 'no request body is accepted' }); return true; }
+  if (isList && req.method !== 'GET') { send(res, 405, { error: 'GET only' }); return true; }
+  if (isRedeem && req.method !== 'POST') { send(res, 405, { error: 'POST only' }); return true; }
+  if (isRedeem && await hasBody(req)) { send(res, 400, { error: 'no request body is accepted' }); return true; }
+
+  const pool = Array.isArray(targetPool) ? targetPool.find((p) => p.provider.id === provider) : targetPool;
   const account = pool && findAccount(pool, url.searchParams.get('account'));
   if (!pool || !account) { send(res, 404, { error: 'unknown account' }); return true; }
-  if (list) {
+  if (listOrRedeemWrongProvider(pool, provider)) { send(res, 404, { error: 'unknown account' }); return true; }
+
+  if (isList) {
     try { send(res, 200, { credits: await pool.listResetCredits(account) }); } catch (error) { send(res, 502, { error: (error as Error).message }); }
     return true;
   }
@@ -53,6 +65,12 @@ export async function handleResetCreditControl(req: IncomingMessage, res: Server
   await pool.recheckUsage(account);
   await pool.listResetCredits(account, true).catch(() => []);
   const reset = !result.skipped && result.kind === 'reset';
-  send(res, reset ? 200 : 409, { account: account.label, reset, outcome: account.resetCreditLastOutcome ?? result.code, resetCredits: account.resetCredits ?? null, unified5h: account.windows.primary?.usage ?? null, unified7d: weeklyWindow(account)?.usage ?? null });
+  const u5h = (account.windows['5h'] ?? account.windows.primary)?.usage ?? null;
+  const u7d = weeklyWindow(account)?.usage ?? null;
+  send(res, reset ? 200 : 409, { account: account.label, reset, outcome: account.resetCreditLastOutcome ?? result.code, resetCredits: account.resetCredits ?? null, unified5h: u5h, unified7d: u7d });
   return true;
+}
+
+function listOrRedeemWrongProvider(pool: AccountPool, expected: 'codex' | 'claude'): boolean {
+  return pool.provider.id !== expected;
 }

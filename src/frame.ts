@@ -448,7 +448,8 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
         if (provider === 'claude') {
           const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1];
           const gauges = [bar(session?.usage, session?.resetsAt, barWidth), bar(weekly?.usage, weekly?.resetsAt, barWidth), bar(fable?.usage, fable?.resetsAt, barWidth)];
-          lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
+          const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? color(36, `RC${saved.resetCredits}`) : '';
+          lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText, credits], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
         } else {
           const shown = codexSlots(account);
           // Reset credits on hand, when the usage endpoint has counted some.
@@ -473,9 +474,9 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
   if (mode === 'groups' && view.groups) lines.push(...groupEditorLines(view.groups, width));
-  // 't' only does something on a Codex row, so it is only offered there.
-  const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
-  if (mode === 'help') lines.push(...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
+  // 't' only does something on a Codex or Claude row, so it is only offered there.
+  const creditSelected = accounts.some((account) => account.credentialId === selectedId && (account.provider === 'codex' || account.provider === 'claude'));
+  if (mode === 'help') lines.push(...helpLines(normalKeys(creditSelected, sortByHeadroom), width));
   const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push('');
   const active = state.active || [];
   const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
@@ -484,7 +485,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   lines.push(...activityLines(active, state.events || [], activityRows, { sessionIds: config.activity?.sessionIds !== false, models: config.activity?.models !== false }, tint));
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
-  const footer = modeFooter(view, codexSelected);
+  const footer = modeFooter(view, creditSelected);
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';
@@ -494,9 +495,9 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   return (height === undefined || drawn.length <= height ? drawn : [...drawn.slice(0, Math.max(0, height - 2)), ...drawn.slice(-Math.min(2, height))]).map((line) => fit(line, width));
 }
 
-function modeFooter(view: FrameView, codexSelected: boolean): string {
+function modeFooter(view: FrameView, creditSelected: boolean): string {
   const { mode } = view;
-  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'groups' && view.groups ? groupEditorFooter(view.groups) : mode === 'normal' ? ` ${normalKeys(codexSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ←→ rank -/+   ↑↓ select   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
+  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'groups' && view.groups ? groupEditorFooter(view.groups) : mode === 'normal' ? ` ${normalKeys(creditSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ←→ rank -/+   ↑↓ select   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
     : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
     : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
 }
@@ -728,14 +729,14 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
     }
   }
 
-  // 't' only does something on a Codex row, so it is only offered there.
-  const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
+  // 't' only does something on a Codex or Claude row, so it is only offered there.
+  const creditSelected = accounts.some((account) => account.credentialId === selectedId && (account.provider === 'codex' || account.provider === 'claude'));
   let overlayPhysical = 0;
   const overlay = (texts: string[]): void => { overlayPhysical += texts.length; push(RANK.overlay, ...texts); };
   if (mode === 'credits' && view.credits) overlay(pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) overlay(routeEditorLines(view.routes, width));
   if (mode === 'groups' && view.groups) overlay(groupEditorLines(view.groups, width));
-  if (mode === 'help') overlay(helpLines(normalKeys(codexSelected, sortByHeadroom), width));
+  if (mode === 'help') overlay(helpLines(normalKeys(creditSelected, sortByHeadroom), width));
 
   // Other agents: one line per usage group under one rule, a provider's
   // groups kept or dropped together. The group names (Gemini …, OpenCode Go,
@@ -780,7 +781,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   const compactKey = (key: string): string => key === '↑↓ select' ? '↑↓ sel' : key === 'd delete' ? 'd del' : key === 'p capture' ? 'p shot' : key.endsWith('-sort') ? key.slice(0, -5) : key;
   const firstFull = ['↑↓ select', 's switch', 'e enable', 'q quit'];
   const first = firstFull.map(compactKey);
-  const footerKeys = mode === 'normal' ? [...first, ...normalKeys(codexSelected, sortByHeadroom).filter((key) => !firstFull.includes(key)).map(compactKey)] : modeFooter(view, codexSelected).trim().split(/\s{2,}/);
+  const footerKeys = mode === 'normal' ? [...first, ...normalKeys(creditSelected, sortByHeadroom).filter((key) => !firstFull.includes(key)).map(compactKey)] : modeFooter(view, creditSelected).trim().split(/\s{2,}/);
   const help = mode === 'normal' ? '? help' : '';
   let footer = ''; const left: string[] = [];
   for (const key of footerKeys) {

@@ -107,7 +107,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   for (const warning of routeWarnings) persist(warning);
   for (const pool of pools) {
     pool.log = (message) => persist(message); pool.saveNow = saveImmediately;
-    if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);
+    pool.resetCredits = resetCreditSettings(config);
   }
   const servers: Server[] = [];
   const ports = { claude: 0, codex: 0, control: 0 };
@@ -172,7 +172,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     // host and gated by the same client token as the proxies.
     const control = createServer(async (req, res) => {
       const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
-      if (await handleResetCreditControl(req, res, pools.find((p) => p.provider.id === 'codex'), config.proxy.clientToken)) return;
+      if (await handleResetCreditControl(req, res, pools, config.proxy.clientToken)) return;
       if (await handleClaudeSessionControl(req, res, config.proxy.clientToken, pools.find((p) => p.provider.id === 'claude'))) return;
       if (await handleClaudeSessionAdopt(req, res, pools.find((p) => p.provider.id === 'claude'), config.proxy.clientToken, (message) => { console.log(`${new Date().toISOString()} [TeamAI] ${message}`); persist(message); })) return;
       if (await reload(req, res)) return;

@@ -18,4 +18,4 @@
 
  Activity ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- ↑↓ select  s switch  e enable  o order  d delete  a add  p capture  R Reload  c config-sort  g routes  q quit
+ ↑↓ select  s switch  e enable  o order  d delete  a add  t credits  p capture  R Reload  c config-sort  g routes  q quit

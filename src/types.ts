@@ -22,6 +22,8 @@ export interface OAuthCredential {
   // workspace and is what the chatgpt-account-id header needs, but every member
   // of a Business/Team workspace shares it, so it cannot tell two members apart.
   userId?: string;
+  // Claude organization UUID for org-scoped API calls such as reset_rate_limits.
+  organizationUuid?: string;
 }
 
 export interface TeamAIConfig {
@@ -69,6 +71,15 @@ export interface TeamAIConfig {
   codexResetCreditsListRefreshMs?: number;
   // Also spend a ticket when only the short (5-hour) window is used up.
   codexResetCreditsSessionWindow?: boolean;
+  // Claude reset credits (cedar_ember grants). Off by default;
+  // automatic use requires explicit claudeResetCredits: true.
+  claudeResetCredits?: boolean;
+  claudeResetCreditsPolicy?: 'fleet' | 'account';
+  claudeResetCreditsCooldownMs?: number;
+  claudeResetCreditsReserve?: number;
+  claudeResetCreditsTimeoutMs?: number;
+  claudeResetCreditsListRefreshMs?: number;
+  claudeResetCreditsSessionWindow?: boolean;
   // Codex upstream model-capacity retry (enabled by default). Retries keep the
   // selected account unless rotation is explicitly enabled.
   codexCapacityEnabled?: boolean;
@@ -106,9 +117,19 @@ export interface QuotaSnapshot {
   resetCredits?: number | null;
 }
 
-// One reset credit as the Codex backend lists it, already filtered to the ones
+// One reset credit as the backend lists it, already filtered to the ones
 // that can be spent. Times are epoch ms.
-export interface ResetCredit { id: string; title: string | null; grantedAt: number | null; expiresAt: number | null }
+export interface ResetCredit {
+  id: string;
+  title: string | null;
+  grantedAt: number | null;
+  expiresAt: number | null;
+  clears?: string[];
+  usableNow?: boolean;
+  givesBackWeekly?: boolean;
+  unavailableReason?: string | null;
+  resetsLeft?: number;
+}
 
 // The reset-credit ledger kept per Codex account and persisted across
 // restarts: an interrupted redemption must still read as possibly spent.
@@ -128,6 +149,7 @@ export interface SubscriptionProfile {
   orgType: string | null;
   hasClaudeMax: boolean | null;
   hasClaudePro: boolean | null;
+  organizationUuid?: string | null;
   fetchedAt: number;
 }
 
@@ -317,7 +339,7 @@ export interface Provider {
   // returns the raw answer (the backend says no with a 200 and a code) and
   // throws on a timeout or a dropped connection.
   fetchResetCredits?(credential: OAuthCredential): Promise<ResetCredit[]>;
-  consumeResetCredit?(credential: OAuthCredential, options: { redeemRequestId: string; creditId?: string; timeoutMs: number }): Promise<{ status: number; body: string }>;
+  consumeResetCredit?(credential: OAuthCredential, options: { redeemRequestId: string; creditId?: string; timeoutMs: number; organizationUuid?: string }): Promise<{ status: number; body: string }>;
 }
 
 export interface RequestIdentity { sessionId: string | null; model: string | null; effort: string | null }

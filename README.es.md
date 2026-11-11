@@ -269,6 +269,8 @@ Si llegan a la vez más solicitudes de las que puede atender la concurrencia com
 
 El endpoint de perfil de Anthropic expone el estado de la suscripción y el nivel, pero no el fin del periodo de facturación actual. El estado del perfil se actualiza al arrancar el servidor y cada seis horas.
 
+**Créditos de reinicio (Codex y Claude).** Una cuenta de ChatGPT o de Anthropic (Claude) puede contener créditos de reinicio: billetes que restablecen las ventanas de uso de una cuenta (el "Full reset" de `/usage` en Codex CLI o los reinicios de límites de Claude). Con `codexResetCredits` (para Codex) o `claudeResetCredits` (para Claude, desactivado por defecto) activo, el relé consume uno de manera autónoma en el punto muerto de cuota: cuando ninguna cuenta de ese proveedor puede atender una petición por haber agotado el presupuesto (no solo por estar ocupada), canjea un billete en la cuenta elegible más óptima —más billetes primero, luego la ventana semanal que reinicie más tarde— y atiende allí la petición. Una cuenta califica solo si su ventana semanal se mide llena (`codexResetCreditsSessionWindow` / `claudeResetCreditsSessionWindow` permite que baste con la ventana de 5 horas), su recuento de billetes leído del endpoint de uso supera la reserva configurada (`codexResetCreditsReserve` / `claudeResetCreditsReserve`) y su último intento es anterior al tiempo de enfriamiento (`codexResetCreditsCooldownMs` / `claudeResetCreditsCooldownMs`). Se consume como máximo un billete por petición. Un billete no se puede devolver, por lo que el relé nunca lo consume por suposición. Tanto las filas de Codex como las de Claude muestran los billetes disponibles como `RC<n>`, `teamai status` los enumera por cuenta, y pulsar `t` en una fila abre un selector para consumir manualmente un billete elegido (`y` para confirmar). Desactivado por defecto para ambos proveedores (`false`); con esto desactivado, no se realiza ninguna llamada automática de créditos de reinicio.
+
 ## Configuración
 
 La configuración y las credenciales viven en `$TEAMAI_HOME`, con respaldo en
@@ -292,6 +294,19 @@ Cada cambio en `config.json` o `credentials.json` vuelve a leer el archivo y lo 
 | `warmup.codex` | `true` | Habilita keep-warm para cuentas de Codex; `false` lo desactiva. |
 | `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
 | `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas Claude de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). Codex siempre usa el ritmo semanal. |
+| `codexResetCredits` | `false` | Consumir créditos de reinicio de Codex automáticamente. |
+| `codexResetCreditsPolicy` | `"fleet"` | `fleet`: cuando se agotan todas las cuentas de Codex. `account`: también con el 429 de agotamiento propio. |
+| `codexResetCreditsCooldownMs` | `1800000` | Tiempo mínimo entre dos intentos en una misma cuenta (ms). |
+| `codexResetCreditsReserve` | `0` | Billetes por cuenta que el uso automático deja intactos. |
+| `codexResetCreditsTimeoutMs` | `10000` | Límite de tiempo en una llamada de canje (ms); superado se considera resultado desconocido. |
+| `codexResetCreditsListRefreshMs` | `600000` | Tiempo de caché de la lista mostrada por `t` (ms). `0` la obtiene una vez. |
+| `codexResetCreditsSessionWindow` | `false` | También permite consumir billete cuando solo se agota la ventana de 5 horas. |
+| `claudeResetCredits` | `false` | Consumir créditos de reinicio de Claude automáticamente (desactivado por defecto). |
+| `claudeResetCreditsCooldownMs` | `1800000` | Tiempo mínimo entre dos intentos en una misma cuenta Claude (ms). |
+| `claudeResetCreditsReserve` | `0` | Billetes por cuenta Claude que el uso automático deja intactos. |
+| `claudeResetCreditsTimeoutMs` | `10000` | Límite de tiempo en una llamada de canje de Claude (ms); superado se considera desconocido. |
+| `claudeResetCreditsListRefreshMs` | `600000` | Tiempo de caché de la lista de Claude mostrada por `t` (ms). `0` la obtiene una vez. |
+| `claudeResetCreditsSessionWindow` | `false` | También permite consumir billete de Claude cuando solo se agota la ventana de 5 horas. |
 | `routes` | — | Opcional. Rutas por modelo y proveedor, `{ "claude": [...], "codex": [...] }`; se editan con `g` en el panel o con `teamai route`. |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 | `proxy.maxBodyMb` | `512` | Opcional. Tamaño máximo del cuerpo de una petición que acepta el relé, en MB. Un número mayor que `0` y como mucho `4096`; otro valor detiene el arranque con el motivo. Un cuerpo mayor no se envía: el relé responde `413` y registra solo el tamaño y el límite. El `413` del propio upstream llega al cliente sin cambios. |

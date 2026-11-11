@@ -23,6 +23,7 @@ import { parseGroups } from './groups.js';
 import { parseBalance } from './pacing.js';
 import { secureEqual } from './proxy.js';
 import { isLoopback } from './reset-credit-control.js';
+import { resetCreditSettings } from './reset-credits.js';
 import { parseRoutes } from './routes.js';
 import { loadConfig, loadCredentials } from './storage.js';
 import type { ProviderId, StoredAccount, TeamAIConfig } from './types.js';
@@ -93,6 +94,7 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
     pool.setGroups(groups);
     pool.balance = balance;
     pool.codexCapacity = capacity;
+    pool.resetCredits = resetCreditSettings(config);
     result.routes[pool.provider.id] = routes[index]!.length;
     result.warnings.push(...pool.setRoutes(routes[index]!).map((warning) => `${pool.provider.label} ${warning}`));
   });

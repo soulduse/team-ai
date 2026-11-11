@@ -202,6 +202,8 @@ Codex の keep-warm はイベント駆動です。計測済みの 5 時間ウィ
 
 Anthropic のプロフィールエンドポイントはサブスクリプションの状態とプランを公開していますが、現在の請求期間の終了日は公開していません。プロフィールの状態はサーバー起動時と、その後 6 時間ごとに更新されます。
 
+**リセットクレジット (Codex および Claude)。** ChatGPT および Anthropic (Claude) アカウントは、利用制限ウィンドウをリセットするチケット（リセットクレジット。Codex CLI の `/usage`「Full reset」または Claude の制限リセット）を保持している場合があります。`codexResetCredits`（Codex 用）または `claudeResetCredits`（Claude 用、既定では無効）を有効にすると、そのプロバイダーのすべてのアカウントが利用枠を使い果たし（単に処理中というわけではなく）リクエストを処理できなくなったクォータの行き詰まり時に、リレーが自動でチケットを 1 枚消費します。条件を満たす最適なアカウント（チケット数が多い順、同数なら週次リセットが最も遅い順）でチケットを適用し、そのアカウントで同じリクエストを処理します。アカウントが対象となるのは、週次ウィンドウが満杯と測定され（`codexResetCreditsSessionWindow` / `claudeResetCreditsSessionWindow` で 5 時間ウィンドウのみの枯渇も対象可）、利用状況エンドポイントから取得されたチケット数が保持用上限（`codexResetCreditsReserve` / `claudeResetCreditsReserve`）を超えており、直近の試行からクールダウン（`codexResetCreditsCooldownMs` / `claudeResetCreditsCooldownMs`）以上経過している場合のみです。1 リクエストにつき最大 1 枚のみ消費されます。チケットは取り戻せないため、リレーが推測で消費することはありません。Codex 行・Claude 行のいずれも手持ちチケット数を `RC<n>` として表示し、`teamai status` でアカウントごとに一覧表示され、行で `t` を押すと手動でチケットを消費するピッカーが開きます（`y` で確認）。両プロバイダーとも既定値は無効（`false`）であり、無効時は自動的なリセットクレジット呼び出しは一切行われません。
+
 ## 設定
 
 設定と資格情報は `$TEAMAI_HOME` に置かれ、なければ `$XDG_CONFIG_HOME/teamai`、次に `~/.config/teamai` の順にフォールバックします。プロキシは `127.0.0.1` にバインドし、生成されたローカルクライアントトークンを要求します。
@@ -223,6 +225,19 @@ Anthropic のプロフィールエンドポイントはサブスクリプショ�
 | `warmup.codex` | `true` | Codex アカウントの keep-warm。`false` で無効化。 |
 | `maxConcurrentPerAccount` | `16` | 1 アカウントあたりに許可される同時実行リクエスト数。`0` で無制限。 |
 | `routing.balance` | `"pacing"` | 同じ優先度の Claude アカウントの並べ方：`pacing`（週次ペース、上記）または `level`（空いているウィンドウ順、10% 刻み）。Codex は常に週次ペースを使います。 |
+| `codexResetCredits` | `false` | Codex リセットクレジットの自動消費。 |
+| `codexResetCreditsPolicy` | `"fleet"` | `fleet`: 全 Codex アカウントが枯渇時。`account`: アカウント自身の 429 枯渇時にも即時消費。 |
+| `codexResetCreditsCooldownMs` | `1800000` | 同一アカウントでの再試行間隔の最小値(ms)。 |
+| `codexResetCreditsReserve` | `0` | 自動消費で残しておくアカウントごとの最小チケット数。 |
+| `codexResetCreditsTimeoutMs` | `10000` | チケット消費呼び出しの制限時間(ms)。超えた場合は成否不明として処理。 |
+| `codexResetCreditsListRefreshMs` | `600000` | `t` に表示するチケット一覧のキャッシュ時間(ms)。`0` は初回のみ取得。 |
+| `codexResetCreditsSessionWindow` | `false` | 5 時間ウィンドウの枯渇のみでもチケットを消費。 |
+| `claudeResetCredits` | `false` | Claude リセットクレジットの自動消費（既定値は無効）。 |
+| `claudeResetCreditsCooldownMs` | `1800000` | 同一 Claude アカウントでの再試行間隔の最小値(ms)。 |
+| `claudeResetCreditsReserve` | `0` | 自動消費で残しておく Claude アカウントごとの最小チケット数。 |
+| `claudeResetCreditsTimeoutMs` | `10000` | Claude チケット消費呼び出しの制限時間(ms)。超えた場合は成否不明として処理。 |
+| `claudeResetCreditsListRefreshMs` | `600000` | `t` に表示する Claude チケット一覧のキャッシュ時間(ms)。`0` は初回のみ取得。 |
+| `claudeResetCreditsSessionWindow` | `false` | 5 時間ウィンドウの枯渇のみでも Claude チケットを消費。 |
 | `routes` | — | 任意。プロバイダーごとのモデルルート `{ "claude": [...], "codex": [...] }`。ダッシュボードの `g` か `teamai route` で編集。 |
 | `proxy.legacyPorts` | — | 任意。プロバイダーごとに応答を継続する追加ポート。例: `{ "claude": [3400] }`。 |
 | `proxy.maxBodyMb` | `512` | 任意。リレーが受け付けるリクエスト本文の最大サイズ(MB)。`0` より大きく `4096` 以下の数値。それ以外の値では理由を示して起動を止めます。超えた本文はアップストリームに送らず `413` を返し、サイズと上限だけを記録します。アップストリーム自身の `413` はそのまま返します。 |

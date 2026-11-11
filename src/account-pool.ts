@@ -797,7 +797,7 @@ export class AccountPool {
       // With reset credits on, an account whose ticket count has gone stale is
       // read too: busy accounts stay fresh through headers, which never carry
       // the count, and would otherwise never have one.
-      const countsDue = (a: RuntimeAccount) => this.resetCredits.enabled && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff;
+      const countsDue = (a: RuntimeAccount) => (this.provider.id === 'codex' ? this.resetCredits.enabled : this.resetCredits.claudeEnabled) && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff;
       const due = this.accounts.filter((a) => a.enabled && !a.retired && !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a) || (a.cooldownReason === 'quota' && (a.cooldownUntil ?? 0) > this.now())));
       await Promise.all(due.map(async (account) => {
         try {
@@ -1142,7 +1142,12 @@ export class AccountPool {
       }
       let outcome: ConsumeOutcome;
       try {
-        const answer = await this.provider.consumeResetCredit!(account.credential, { redeemRequestId: randomUUID(), creditId: options.creditId, timeoutMs: this.resetCredits.timeoutMs });
+        const answer = await this.provider.consumeResetCredit!(account.credential, {
+          redeemRequestId: randomUUID(),
+          creditId: options.creditId,
+          timeoutMs: this.resetCredits.timeoutMs,
+          organizationUuid: account.profile?.organizationUuid ?? account.credential.organizationUuid,
+        });
         outcome = classifyConsume(answer.status, answer.body);
       } catch (error) {
         const timedOut = (error as Error).name === 'TimeoutError' || (error as Error).name === 'AbortError';
@@ -1172,7 +1177,7 @@ export class AccountPool {
     // A reset that reset nothing leaves usage and benches as they were.
     if (outcome.kind !== 'reset') return;
     account.usage = 0; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null; account.resetCreditResetAt = now;
-    for (const name of ['primary', 'secondary']) { const window = account.windows[name]; if (window) account.windows[name] = { ...window, usage: 0, resetsAt: null }; }
+    for (const name of ['primary', 'secondary', '5h', '7d', '7d_oi']) { const window = account.windows[name]; if (window) account.windows[name] = { ...window, usage: 0, resetsAt: null }; }
   }
 
   private logRedeem(account: RuntimeAccount, reason: string, outcome: ConsumeOutcome): void {

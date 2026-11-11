@@ -1,4 +1,4 @@
-import { parseResetCreditList, resetCreditCount } from './reset-credits.js';
+import { claudeResetCreditCount, parseClaudeResetCreditList, parseResetCreditList, resetCreditCount } from './reset-credits.js';
 import type { OAuthCredential, Provider, QuotaSnapshot, QuotaWindow } from './types.js';
 
 // accept-encoding is dropped too: fetch negotiates and decompresses on its own,
@@ -102,7 +102,7 @@ function timestamp(raw: string | null): number | null {
 // five_hour/seven_day fields back it up for a response without `limits`.
 interface ClaudeUsageLimit { kind?: string; percent?: number; resets_at?: string | null; scope?: { model?: { display_name?: string | null } | null } | null }
 interface ClaudeUsageWindow { utilization?: number | null; resets_at?: string | null }
-export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; five_hour?: ClaudeUsageWindow | null; seven_day?: ClaudeUsageWindow | null }): QuotaSnapshot | null {
+export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; five_hour?: ClaudeUsageWindow | null; seven_day?: ClaudeUsageWindow | null; cedar_ember?: unknown }): QuotaSnapshot | null {
   const windows: Record<string, QuotaWindow> = {};
   const put = (name: string, percent: number | null | undefined, reset: string | null | undefined): void => {
     if (typeof percent === 'number' && Number.isFinite(percent)) windows[name] = { usage: Math.max(0, Math.min(1, percent / 100)), resetsAt: timestamp(reset ?? null) };
@@ -116,7 +116,8 @@ export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; fiv
   if (!windows['7d']) put('7d', data.seven_day?.utilization, data.seven_day?.resets_at);
   if (!Object.keys(windows).length) return null;
   const routing = ['5h', '7d'].map((name) => windows[name]).filter((x) => x?.usage != null).sort((a, b) => (b?.usage ?? 0) - (a?.usage ?? 0))[0];
-  return { routingUsage: routing?.usage ?? null, routingResetsAt: routing?.resetsAt ?? null, windows };
+  const resetCredits = claudeResetCreditCount(data);
+  return { routingUsage: routing?.usage ?? null, routingResetsAt: routing?.resetsAt ?? null, windows, ...(typeof resetCredits === 'number' ? { resetCredits } : {}) };
 }
 
 // Codex's /wham/usage: the same primary/secondary windows the x-codex-* headers
@@ -304,13 +305,58 @@ export const claudeProvider: Provider = {
   async fetchProfile(credential) {
     const response = await fetch(`${this.upstreamBase}/api/oauth/profile`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Claude profile failed (${response.status})`);
-    const data = await response.json() as { account?: { has_claude_max?: boolean; has_claude_pro?: boolean }; organization?: { subscription_status?: string; subscription_created_at?: string; rate_limit_tier?: string; organization_type?: string } };
-    return { status: data.organization?.subscription_status ?? null, createdAt: data.organization?.subscription_created_at ?? null, rateLimitTier: data.organization?.rate_limit_tier ?? null, orgType: data.organization?.organization_type ?? null, hasClaudeMax: data.account?.has_claude_max ?? null, hasClaudePro: data.account?.has_claude_pro ?? null, fetchedAt: Date.now() };
+    const data = await response.json() as { account?: { has_claude_max?: boolean; has_claude_pro?: boolean }; organization?: { uuid?: string; id?: string; subscription_status?: string; subscription_created_at?: string; rate_limit_tier?: string; organization_type?: string } };
+    return { status: data.organization?.subscription_status ?? null, createdAt: data.organization?.subscription_created_at ?? null, rateLimitTier: data.organization?.rate_limit_tier ?? null, orgType: data.organization?.organization_type ?? null, hasClaudeMax: data.account?.has_claude_max ?? null, hasClaudePro: data.account?.has_claude_pro ?? null, organizationUuid: data.organization?.uuid ?? data.organization?.id ?? null, fetchedAt: Date.now() };
   },
   async fetchUsage(credential) {
     const response = await fetch(`${this.upstreamBase}/api/oauth/usage`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
     return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
+  },
+  async fetchResetCredits(credential) {
+    const response = await fetch(`${this.upstreamBase}/api/oauth/usage?cedar_ember=1&skip_spend=1`, {
+      headers: {
+        authorization: `Bearer ${credential.accessToken}`,
+        'User-Agent': 'claude-cli/2.1.322 (external, cli)',
+        'x-app': 'cli',
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`Claude reset credit list failed (${response.status})`);
+    return parseClaudeResetCreditList(await response.json());
+  },
+  async consumeResetCredit(credential, options) {
+    let orgUuid = options.organizationUuid ?? credential.organizationUuid;
+    if (!orgUuid) {
+      const profile = await this.fetchProfile!(credential);
+      orgUuid = profile.organizationUuid ?? undefined;
+    }
+    if (!orgUuid) throw new Error('No Claude organization UUID found');
+    let creditId = options.creditId;
+    if (!creditId) {
+      const credits = await this.fetchResetCredits!(credential);
+      creditId = credits[0]?.id;
+    }
+    if (!creditId) throw new Error('No Claude reset credit ID specified or available');
+    const payload = {
+      program: 'cedar_ember',
+      grant_id: creditId,
+      request_id: options.redeemRequestId,
+    };
+    const response = await fetch(`${this.upstreamBase}/api/organizations/${orgUuid}/reset_rate_limits`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${credential.accessToken}`,
+        'content-type': 'application/json',
+        'anthropic-beta': 'oauth-2025-04-20',
+        'User-Agent': 'claude-cli/2.1.322 (external, cli)',
+        'x-app': 'cli',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(options.timeoutMs),
+    });
+    return { status: response.status, body: await response.text() };
   },
 };
 

@@ -215,6 +215,8 @@ Codex·Claude keep-warm은 이벤트 기반입니다. 측정된 5시간 창이 �
 
 Anthropic의 프로필 엔드포인트는 구독 상태와 등급은 주지만 현재 청구 주기의 종료일은 주지 않습니다. 프로필 상태는 서버 기동 시와 이후 6시간마다 갱신됩니다.
 
+**리셋 크레딧 (Codex 및 Claude).** ChatGPT 및 Anthropic(Claude) 계정은 사용량 창을 리셋하는 티켓(리셋 크레딧, Codex CLI의 `/usage` "Full reset" 또는 Claude 한도 리셋)을 보유할 수 있습니다. `codexResetCredits`(Codex용) 또는 `claudeResetCredits`(Claude용, 기본값 꺼짐) 설정을 켜면, 해당 제공자의 모든 계정이 예산 소진(단순 사용 중이 아님)으로 요청을 처리할 수 없는 할당량 막다른 골목에서 릴레이가 자율적으로 티켓 1장을 사용합니다. 자격 요건을 갖춘 최선의 계정(티켓이 가장 많은 계정 우선, 동률이면 주간 리셋이 가장 늦은 계정)에서 티켓을 사용하고 해당 계정으로 요청을 전달합니다. 계정 자격은 주간 창이 꽉 찬 것으로 측정되고(`codexResetCreditsSessionWindow` / `claudeResetCreditsSessionWindow`를 켜면 5시간 창 소진만으로도 자격 충족), 사용량 엔드포인트에서 조회된 티켓 수가 설정된 예비 수량(`codexResetCreditsReserve` / `claudeResetCreditsReserve`)을 초과하며, 마지막 사용 시도가 쿨다운(`codexResetCreditsCooldownMs` / `claudeResetCreditsCooldownMs`)보다 오래된 경우에만 인정됩니다. 요청 하나당 최대 1장의 티켓만 사용합니다. 티켓은 되돌릴 수 없으므로 릴레이는 추측으로 사용하지 않습니다: 호출 전 디스크에 `pending`으로 기록하고, 판독할 수 없는 응답(타임아웃, 5xx, 알 수 없는 코드)은 사용된 것으로 간주하여 다음 계정을 시도하지 않고 중단합니다. 재시작 후 발견된 `pending`은 사용량 조회로 티켓 수를 다시 확인할 때까지(또는 15분 경과) 해당 계정의 자동 사용을 차단하며, 매 시도 1.5초 후 사용량을 다시 읽습니다. 리셋 후 2분 동안은 리셋 이전 응답 수치나 사용량을 높이는 조회를 무시하며, 새로운 429는 즉시 반영합니다. Codex 및 Claude 행 모두 보유 티켓을 `RC<n>`으로 표시하고, `teamai status`는 계정별로 나열하며, 행에서 `t`를 누르면 수동 사용 피커가 열립니다(`y`로 확인). 두 제공자 모두 기본값은 꺼짐(`false`)이며, 꺼져 있을 때는 자동 리셋 크레딧 호출이 일절 발생하지 않습니다.
+
 ## 설정
 
 설정과 자격증명은 `$TEAMAI_HOME`에 저장되며, 없으면 `$XDG_CONFIG_HOME/teamai`, 그다음 `~/.config/teamai` 순으로 결정됩니다. 프록시는 `127.0.0.1`에 바인딩하며 생성된 로컬 클라이언트 토큰을 요구합니다.
@@ -236,6 +238,19 @@ Anthropic의 프로필 엔드포인트는 구독 상태와 등급은 주지만 �
 | `warmup.codex` | `true` | Codex 계정 keep-warm 활성화 여부. `false`이면 Codex keep-warm 비활성화. |
 | `maxConcurrentPerAccount` | `16` | 계정당 동시 처리 요청 수. `0`이면 무제한. |
 | `routing.balance` | `"pacing"` | 같은 우선순위 Claude 계정의 정렬 방식: `pacing`(주간 진도, 위 설명) 또는 `level`(덜 찬 창 순, 10% 단위). Codex는 항상 주간 pacing을 사용합니다. 그 밖의 값이면 이유를 남기고 기동을 멈추며, 대시보드는 `pacing` 순서로 그립니다. |
+| `codexResetCredits` | `false` | Codex 리셋 크레딧 자동 사용. |
+| `codexResetCreditsPolicy` | `"fleet"` | `fleet`: 전체 Codex 계정 예산 소진 시. `account`: 계정 자체 429 소진 시 즉시 사용. |
+| `codexResetCreditsCooldownMs` | `1800000` | 한 계정의 두 시도 사이 최소 간격(ms). |
+| `codexResetCreditsReserve` | `0` | 자동 사용 시 건드리지 않고 남겨둘 계정당 최소 티켓 수. |
+| `codexResetCreditsTimeoutMs` | `10000` | 티켓 사용 호출 제한 시간(ms); 초과 시 결과 미상 처리. |
+| `codexResetCreditsListRefreshMs` | `600000` | `t`에 표시되는 티켓 목록 캐시 시간(ms). `0`은 1회 조회. |
+| `codexResetCreditsSessionWindow` | `false` | 5시간 창 소진만으로도 티켓 사용 허용. |
+| `claudeResetCredits` | `false` | Claude 리셋 크레딧 자동 사용(기본값 꺼짐). |
+| `claudeResetCreditsCooldownMs` | `1800000` | 한 Claude 계정의 두 시도 사이 최소 간격(ms). |
+| `claudeResetCreditsReserve` | `0` | 자동 사용 시 남겨둘 계정당 최소 Claude 티켓 수. |
+| `claudeResetCreditsTimeoutMs` | `10000` | Claude 티켓 사용 호출 제한 시간(ms); 초과 시 결과 미상 처리. |
+| `claudeResetCreditsListRefreshMs` | `600000` | `t`에 표시되는 Claude 티켓 목록 캐시 시간(ms). `0`은 1회 조회. |
+| `claudeResetCreditsSessionWindow` | `false` | 5시간 창 소진만으로도 Claude 티켓 사용 허용. |
 | `routes` | — | 선택. 제공자별 모델 라우트 `{ "claude": [...], "codex": [...] }` (모델 라우트 참고). 대시보드 `g`나 `teamai route`로 편집. |
 | `proxy.legacyPorts` | — | 선택. 프로바이더별로 계속 응답할 추가 포트 — 예: `{ "claude": [3400] }`. |
 | `proxy.maxBodyMb` | `512` | 선택. 릴레이가 받는 요청 본문의 최대 크기(MB). `0`보다 크고 `4096` 이하인 수여야 하며, 그 밖의 값이면 이유를 남기고 기동을 멈춥니다. |

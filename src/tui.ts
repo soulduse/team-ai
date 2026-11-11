@@ -82,12 +82,14 @@ export async function runTui(): Promise<void> {
     const config = await loadConfig(); const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
     return fetch(`http://${config.proxy.host}:${port}${path}`, { method, headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(60_000) });
   };
+  let creditProvider: 'codex' | 'claude' = 'codex';
   const openCredits = async (): Promise<void> => {
     const account = selected(await rows());
-    if (!account || account.provider !== 'codex') { message = 'Reset credits: select a Codex account first'; return; }
+    if (!account || (account.provider !== 'codex' && account.provider !== 'claude')) { message = 'Reset credits: select a Claude or Codex account first'; return; }
+    creditProvider = account.provider;
     creditAccount = account.credentialId; mode = 'credits'; credits = { account: account.label, phase: 'loading', items: [], index: 0 }; busy = true; await render();
     try {
-      const response = await control(`/codex/reset-credits?account=${encodeURIComponent(account.credentialId)}`);
+      const response = await control(`/${account.provider}/reset-credits?account=${encodeURIComponent(account.credentialId)}`);
       const body = await response.json() as { credits?: ResetCredit[]; error?: string };
       if (!response.ok) throw new Error(body.error || `control ${response.status}`);
       // Listed soonest-to-expire first, so the default choice is that one.
@@ -99,7 +101,7 @@ export async function runTui(): Promise<void> {
     if (!credits || !creditAccount) return;
     const chosen = creditList[credits.index]; credits = { ...credits, phase: 'applying' }; busy = true; await render();
     try {
-      const response = await control(`/codex/reset-credit?account=${encodeURIComponent(creditAccount)}${chosen ? `&credit_id=${encodeURIComponent(chosen.id)}` : ''}`, 'POST');
+      const response = await control(`/${creditProvider}/reset-credit?account=${encodeURIComponent(creditAccount)}${chosen ? `&credit_id=${encodeURIComponent(chosen.id)}` : ''}`, 'POST');
       const body = await response.json() as { outcome?: string; error?: string };
       credits = { ...credits, phase: 'done', result: body.outcome ?? body.error ?? `error ${response.status}` };
     } catch (error) { credits = { ...credits, phase: 'done', result: `error: ${(error as Error).message}` }; }
