@@ -64,7 +64,10 @@ test('buildFrame draws both sections, the column titles and the footer within th
   assert.ok(withSession.some((line) => line.includes('5h session') && line.includes('7d overall')), 'a live 5h window brings the column back');
   assert.ok(lines.some((line) => line.startsWith('> c@example.com')), 'cursor on the selected row');
   const footer = lines.at(-1)!;
-  assert.match(footer, /p capture/); assert.match(footer, /c quota-sort/); assert.match(footer, /hello$/);
+  // With a message the key hints give way to it; without one they all fit.
+  assert.match(footer, /p\/P capture/); assert.match(footer, /hello$/);
+  const hints = withSession.at(-1)!;
+  assert.match(hints, /p\/P capture/); assert.match(hints, /c quota-sort/); assert.match(hints, /q quit/);
   assert.equal(lines.join('\n').includes('tai-secret'), false);
 });
 

@@ -197,7 +197,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   for (const event of [...(state.events || [])].reverse().slice(0, activityRows)) lines.push(`${color(90, new Date(event.at).toLocaleTimeString('en-GB'))} ${event.message}`);
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
-  const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
+  const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  p/P capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';

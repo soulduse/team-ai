@@ -4,6 +4,7 @@ import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, displayOrder, ESC, type FrameMode } from './frame.js';
+import type { RedactLevel } from './redact.js';
 import { runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
 import type { StoredAccount } from './types.js';
@@ -48,13 +49,15 @@ export async function runTui(): Promise<void> {
   // Snapshot what is on screen — same width, cursor and sort — with account
   // addresses masked, so the result can be pasted somewhere public as is.
   // Then hand it over: reveal it in the file manager and put the image on the
-  // clipboard, saying which of those actually happened.
-  const capture = async (): Promise<void> => {
+  // clipboard, saying which of those actually happened. `p` masks the
+  // addresses in part; `P` swaps them for `account #N`, for a capture that
+  // should not hint at who the accounts belong to.
+  const capture = async (level: RedactLevel): Promise<void> => {
     busy = true;
     try {
-      const result = await captureDashboard({ level: 'partial', width: Math.max(80, process.stdout.columns || 120), selectedId, mode, sortByHeadroom });
+      const result = await captureDashboard({ level, width: Math.max(80, process.stdout.columns || 120), selectedId, mode, sortByHeadroom });
       const [copied, revealed] = await Promise.all([copyImageToClipboard(result.png), revealInFolder(result.png)]);
-      const extras = [copied ? 'copied to clipboard' : 'clipboard unavailable', revealed ? 'opened folder' : ''].filter(Boolean).join(', ');
+      const extras = [level === 'full' ? 'accounts numbered' : '', copied ? 'copied to clipboard' : 'clipboard unavailable', revealed ? 'opened folder' : ''].filter(Boolean).join(', ');
       message = `Captured ${result.png.slice(result.png.lastIndexOf('/') + 1)} — ${extras}`;
     } catch (error) { message = `Capture failed: ${(error as Error).message}`; }
     finally { busy = false; }
@@ -84,7 +87,7 @@ export async function runTui(): Promise<void> {
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
       else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
-      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 'p') { await capture(); }
+      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 'p') { await capture('partial'); } else if (key === 'P') { await capture('full'); }
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();
