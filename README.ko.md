@@ -135,6 +135,7 @@ teamai tui                                     # 대시보드만 (자동 기동 
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 또는: auto
+teamai fable-only claude user@example.com on  # 또는: off
 teamai capture [--redact partial|full|none] [--out DIR]   # 대시보드를 .txt + .png로 저장 (TTY 불필요)
 ```
 
@@ -143,6 +144,8 @@ teamai capture [--redact partial|full|none] [--out DIR]   # 대시보드를 .txt
 **모델 인식 라우팅.** 모델별 주간 창을 소비하는 것은 최상위 모델(Claude의 Fable 등급)뿐이므로, 그것이 필요 없는 요청 — Opus, Sonnet, Haiku — 은 Fable 예산이 아직 남은 계정을 피해 Fable 창을 이미 다 쓴 계정(`fableReserveThreshold` 이상)으로 보내고, 그 그룹 안에서는 전체 주간 창 기준으로 정렬합니다. 이렇게 하면 계정마다 귀한 Fable 예산을 정말 필요한 요청에 남겨 두면서, 그렇지 않으면 놀고 있을 주간 여유분을 활용하게 됩니다. 소진된 계정이 하나도 비어 있지 않으면 실패하는 대신 예약된 계정으로 되돌아갑니다. Fable 요청은 그대로 적게 쓴 순을 따르며, `fableReserveThreshold`를 `1`로 두면 이 분리를 끕니다.
 
 Fable 등급 429(`7d_oi`는 거절됐지만 공유 `7d` 창은 아직 허용된 경우)는 계정 전체가 아니라 그 계정의 Fable 창만 벤치합니다 — 최상위 모델만 소비하는 예산 때문에 계정 전체를 최대 일주일 놀리는 대신, 다른 모델은 그 계정에서 계속 처리됩니다. 공유 창을 거절하는 429는 평소대로 계정 전체를 벤치합니다.
+
+**Fable 전용 계정.** `teamai fable-only claude <계정> on`으로 Claude 계정 하나를 Fable 전용으로 만듭니다. 그 계정의 모델별 주간(Fable) 창에 예산이 남아 있는 동안에는 모든 Fable 요청이 다른 어느 계정보다(고정 우선순위보다도) 먼저 그 계정으로 가고, 다른 모델(Opus, Sonnet, Haiku) 요청은 보내지 않습니다(릴레이 자체의 백그라운드 할당량 측정만 예외). Fable 한도는 주간 한도의 최대 절반이라, 그 창을 다 쓰면 계정의 남은 주간 여유가 놀게 됩니다. 그래서 그때부터는 Fable이 다른 계정으로 넘어가고, Fable 전용 계정은 다른 모델을 일반 계정처럼 처리합니다. 예약 중인 동안 대시보드 상태는 `fable`로 표시됩니다. 실행 중인 릴레이는 대시보드의 `R`이나 `teamai restart`로 변경을 반영합니다.
 
 전체 화면 TUI는 Claude와 Codex 계정을 그룹으로 묶고, 사용량이 바뀌어도 현재 선택된 계정을 고정해 둡니다. Claude 행은 `7d overall`과 모델 범위의 `7d Fable` 창을 각각 보여주고(Claude가 2026년 11월 5시간 세션 한도를 주간 한도로 통합했기 때문에, `5h session` 열은 살아 있는 5시간 창을 보고하는 계정이 있을 때만 나타납니다), Codex 행은 주/부 창을 해당 계정이 실제로 보고한 기간을 제목으로 달아(`1w limit`) 보여줍니다. 할당량은 공식 클라이언트 응답에서 학습하며 재시작해도 유지됩니다.
 

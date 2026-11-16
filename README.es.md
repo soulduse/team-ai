@@ -162,6 +162,7 @@ teamai tui                                     # solo el panel, sin inicio autom
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # o bien: auto
+teamai fable-only claude user@example.com on  # o bien: off
 teamai capture [--redact partial|full|none] [--out DIR]   # guarda el panel como .txt y .png (sin TTY)
 ```
 
@@ -195,6 +196,8 @@ cuenta: todos los demás modelos se siguen atendiendo desde ella, en vez de que
 la cuenta entera quede inactiva hasta una semana por un presupuesto que solo
 consume el modelo superior. Un 429 que rechaza una ventana compartida limita la
 cuenta como de costumbre.
+
+**Cuentas solo Fable.** `teamai fable-only claude <cuenta> on` convierte una cuenta de Claude en la casa de Fable. Mientras su ventana semanal por modelo (Fable) tenga presupuesto, toda solicitud Fable va primero a ella —por delante de cualquier otra cuenta, incluso de una prioridad fijada— y no se le enruta ninguna solicitud de otro modelo (Opus, Sonnet, Haiku); solo los sondeos de cuota en segundo plano del propio relay pueden tocarla. La asignación de Fable es como mucho la mitad del límite semanal, así que cuando esa ventana se agota el resto de la semana de la cuenta quedaría ocioso: desde entonces Fable pasa a las demás cuentas y la cuenta solo Fable atiende los demás modelos como cualquier otra. El panel muestra su estado como `fable` mientras está reservada. Un relay en marcha aplica el cambio con `R` en el panel o con `teamai restart`.
 
 La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente la ventana `7d overall` y la ventana por modelo `7d Fable` (Claude integró su límite de sesión de 5 horas en el semanal en noviembre de 2026, así que la columna `5h session` solo aparece mientras alguna cuenta siga reportando una ventana de 5 horas activa); las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
 

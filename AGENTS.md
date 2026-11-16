@@ -81,6 +81,7 @@ teamai tui                                # dashboard only (needs a TTY)
 teamai enable  <claude|codex> <account>
 teamai disable <claude|codex> <account>
 teamai priority <claude|codex> <account> <rank|auto>
+teamai fable-only claude <account> on|off   # Fable first; no other model while its Fable window has budget
 teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png; no TTY needed
 ```
 

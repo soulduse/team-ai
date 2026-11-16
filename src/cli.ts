@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     case 'enable': await toggle(true); break;
     case 'disable': await toggle(false); break;
     case 'priority': await priority(); break;
+    case 'fable-only': await fableOnly(); break;
     case 'server': await runServer(); break;
     case 'start': await ensureServer(); await runTui(); break;
     case 'status': await status(); break;
@@ -65,9 +66,10 @@ async function selectProvider(promptLabel: string): Promise<ProviderId> {
 
 async function accounts(filter?: ProviderId): Promise<void> {
   const config = await loadConfig(); const state = await loadState();
-  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}`); }
+  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}${a.fableOnly ? ' (fable only)' : ''}`); }
 }
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
+async function fableOnly(): Promise<void> { const id = provider(args[0]); if (id !== 'claude') throw new Error('fable-only applies to Claude accounts only'); const mode = args.at(-1); const name = args.slice(1, -1).join(' '); if (mode !== 'on' && mode !== 'off') throw new Error('Use on or off'); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.fableOnly = mode === 'on' || undefined; await saveConfig(config); console.log(`Fable only ${mode}: ${account.label} (a running relay picks it up on R in the dashboard or teamai restart)`); }
 async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }
 
 async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); }
@@ -168,6 +170,7 @@ Usage:
   teamai start|restart|status|stop
   teamai enable|disable <provider> <account>
   teamai priority <provider> <account> <rank|auto>
+  teamai fable-only claude <account> on|off
   teamai capture [--redact partial|full|none] [--out DIR]
                                        Save the dashboard as .txt and .png,
                                        account addresses masked (no TTY needed)

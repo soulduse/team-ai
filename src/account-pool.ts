@@ -162,14 +162,23 @@ export class AccountPool {
     const limit = lastResort ? 1 : this.threshold;
     if (!(account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < limit))) return false;
     if (wantsFable && AccountPool.fableSpent(account, 1)) return false;
+    if (this.keptForFable(account, wantsFable)) return false;
     return true;
+  }
+
+  // A fable-only account turns away every other model while it still has Fable
+  // budget. Fable is at most half of the weekly limit, so once its Fable window
+  // is spent the rest of its week would sit idle: it then serves other models.
+  // Only a provider with a Fable tier honours the flag (Codex never asks for Fable).
+  private keptForFable(account: RuntimeAccount, wantsFable: boolean): boolean {
+    return !wantsFable && account.fableOnly === true && Boolean(this.provider.fableModel) && !AccountPool.fableSpent(account, 1);
   }
 
   // acquire returned nothing but at least one account is otherwise healthy and
   // merely at its concurrency cap: the request should be told to retry, not that
   // the fleet is out of quota.
-  saturatedButHealthy(excluded: Set<string> = new Set()): boolean {
-    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded, true, true) && this.atConcurrencyCap(a));
+  saturatedButHealthy(excluded: Set<string> = new Set(), wantsFable = true): boolean {
+    return this.accounts.some((a) => this.availableIgnoringConcurrency(a, excluded, wantsFable, true) && this.atConcurrencyCap(a));
   }
 
   // Why acquire() just came back empty, worded for the client that is about
@@ -179,24 +188,27 @@ export class AccountPool {
   // (other models still work), and the earliest moment anything rolls over.
   explainShortfall(excluded: Set<string>, wantsFable: boolean): Shortfall {
     const label = this.provider.label;
-    if (this.saturatedButHealthy(excluded)) {
+    if (this.saturatedButHealthy(excluded, wantsFable)) {
       return { reason: 'concurrency_saturated', retryAfterMs: 5_000, message: `Every ${label} account with budget left is at its concurrency cap (${this.maxConcurrent} requests in flight each). Retry in a few seconds.` };
     }
     const now = Date.now();
     const live = this.accounts.filter((a) => a.enabled && !a.error && !excluded.has(a.id));
     const resets: Array<{ at: number; label: string }> = [];
-    let fableSpent = 0; let overLimit = 0; let coolingDown = 0;
+    let fableSpent = 0; let overLimit = 0; let coolingDown = 0; let keptForFable = 0;
     for (const account of live) {
       const fable = AccountPool.fableWindow(account);
       if (wantsFable && AccountPool.fableSpent(account, 1)) { fableSpent++; if (fable?.resetsAt) resets.push({ at: fable.resetsAt, label: `${account.label} Fable weekly` }); continue; }
       if (account.usage !== null && account.usage >= 1) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} usage limit` }); continue; }
-      if (account.cooldownUntil && account.cooldownUntil > now) { coolingDown++; resets.push({ at: account.cooldownUntil, label: `${account.label} cooldown` }); }
+      if (account.cooldownUntil && account.cooldownUntil > now) { coolingDown++; resets.push({ at: account.cooldownUntil, label: `${account.label} cooldown` }); continue; }
+      // its Fable reset frees nothing for this request, so it is not offered as a reset time
+      if (this.keptForFable(account, wantsFable)) keptForFable++;
     }
     const next = resets.filter((r) => r.at > now).sort((a, b) => a.at - b.at)[0];
     const parts: string[] = [];
     if (fableSpent) parts.push(`${fableSpent} spent the Fable weekly budget`);
     if (overLimit) parts.push(`${overLimit} used up the usage limit`);
     if (coolingDown) parts.push(`${coolingDown} cooling down after an upstream rejection`);
+    if (keptForFable) parts.push(`${keptForFable} kept for Fable only`);
     const what = wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
     const detail = parts.length ? ` (${live.length} accounts: ${parts.join(', ')})` : ` (${live.length} accounts)`;
     const when = next ? ` Earliest reset in ${AccountPool.formatDuration(next.at - now)}: ${next.label}.` : '';
@@ -274,6 +286,8 @@ export class AccountPool {
   // Whether a non-Fable request should leave this account for one that does
   // not reserve Fable — only when such an account can actually take it.
   private divertsOff(account: RuntimeAccount, wantsFable: boolean, excluded: Set<string>): boolean {
+    // A Fable turn leaves an ordinary account while a Fable-only account can take it.
+    if (wantsFable) return !account.fableOnly && this.accounts.some((a) => a.fableOnly && this.available(a, excluded, true));
     return !wantsFable && this.reservesFable(account) && this.accounts.some((a) => a !== account && !this.reservesFable(a) && this.available(a, excluded, false));
   }
 
@@ -286,8 +300,7 @@ export class AccountPool {
   // the next turn for nothing. Only a quota or forbidden cooldown evicts.
   private isHome(account: RuntimeAccount, wantsFable: boolean): boolean {
     if (account.cooldownReason === 'network') {
-      const now = Date.now();
-      const still = account.enabled && !account.error && (account.usage === null || account.usage < this.threshold) && !(wantsFable && AccountPool.fableSpent(account, 1));
+      const still = account.enabled && !account.error && (account.usage === null || account.usage < this.threshold) && !(wantsFable && AccountPool.fableSpent(account, 1)) && !this.keptForFable(account, wantsFable);
       return still && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
     }
     return this.availableIgnoringConcurrency(account, NO_EXCLUSIONS, wantsFable) && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
@@ -335,6 +348,14 @@ export class AccountPool {
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
   }
   private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot): void {
+    // A Fable 429 marked the window spent (100%); a usage poll that then rounds the
+    // same window down to 99% would hand it back to Fable for one more 429 and push
+    // a fable-only account's other-model sessions off it again. Same window → keep it spent.
+    for (const [name, next] of Object.entries(quota.windows)) {
+      const prev = account.windows[name];
+      const sameWindow = prev?.resetsAt == null || next.resetsAt == null || Math.abs(next.resetsAt - prev.resetsAt) <= 5 * 60_000;
+      if (/^7d_[a-z0-9]+$/i.test(name) && prev?.usage != null && prev.usage >= 1 && next.usage !== null && next.usage >= 0.99 && sameWindow) quota.windows[name] = { ...next, usage: 1 };
+    }
     account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = Date.now();
   }
   cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
@@ -529,7 +550,7 @@ export class AccountPool {
       if (live) {
         // Config fields may have been edited (label, enabled, priority); runtime
         // fields and the possibly-refreshed credential stay as they are.
-        next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority }));
+        next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority, fableOnly: account.fableOnly }));
       } else {
         added++;
         next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });
