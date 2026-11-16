@@ -15,6 +15,7 @@ import { releaseServerFile, runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, paths, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
 import type { ProviderId } from './types.js';
+import { resetTickets } from './frame.js';
 
 const invokedAs = basename(process.argv[1] || 'teamai');
 const inputArgs = process.argv.slice(2);
@@ -65,7 +66,7 @@ async function selectProvider(promptLabel: string): Promise<ProviderId> {
 
 async function accounts(filter?: ProviderId): Promise<void> {
   const config = await loadConfig(); const state = await loadState();
-  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}`); }
+  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}${resetTickets(s?.resetCredits) ? ` resets ${resetTickets(s?.resetCredits)}${s?.resetCredits?.nextExpiry ? ` (first expires ${new Date(s.resetCredits.nextExpiry).toISOString().slice(0, 10)})` : ''}` : ''}`); }
 }
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
 async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }

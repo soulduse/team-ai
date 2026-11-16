@@ -188,6 +188,8 @@ model keeps being served from it, instead of the whole account sitting idle for
 up to a week over a budget only the top model spends. A 429 that rejects a
 shared window benches the account as usual.
 
+**Limit-reset tickets.** Claude may grant an account limit-reset tickets. The `resets` column and `teamai accounts` show how many each account holds: `R<n>` resets the whole weekly limit, `F<n>` only the Fable window. They are read from the same usage request the relay already makes (`?cedar_ember=1`); TeamAI only displays them and never redeems one — use them from Claude itself.
+
 The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the `7d overall` and model-scoped `7d Fable` windows independently — Claude folded its 5-hour session limit into the weekly one in November 2026, so a `5h session` column appears only while some account still reports a live 5-hour window; Codex rows show its primary and secondary windows, each titled with the span that account actually reports (`1w limit`). Quotas are learned from official-client responses and retained across restarts.
 
 The footer exposes the same account workflow as TeamClaude: launch Claude/Codex, select, switch, enable/disable, order, delete, add/login, re-measure (`R`), and quit. `switch` pins the selected account to the front of its provider pool; order mode can assign a rank or return an account to automatic scheduling. Claude profile refreshes show the plan tier (`Ultra` (formerly Max 20x), `Max 5x`, `Pro`; a tier TeamAI does not recognise is shown by its reported name rather than as `OAuth`) and unhealthy subscription states such as `past_due` in red.

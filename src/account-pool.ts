@@ -40,7 +40,7 @@ export class AccountPool {
       // retry-after came back to park seven accounts across restarts. If the
       // account really is spent, the next request re-derives the right cooldown
       // (model-quota → Fable only, real quota → whole account).
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, resetCredits: saved?.resetCredits ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -336,6 +336,7 @@ export class AccountPool {
   }
   private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot): void {
     account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = Date.now();
+    if (quota.resetCredits !== undefined) account.resetCredits = quota.resetCredits;
   }
   cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
 
@@ -675,7 +676,7 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
+    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, resetCredits: a.resetCredits ?? null, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
   }
 }

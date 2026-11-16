@@ -64,6 +64,16 @@ export interface QuotaSnapshot {
   routingUsage: number | null;
   routingResetsAt: number | null;
   windows: Record<string, QuotaWindow>;
+  // Limit-reset tickets the account holds (Claude `cedar_ember` grants); absent
+  // when the response did not carry them, so an older reading is kept.
+  resetCredits?: ResetCredits | null;
+}
+
+// Counts only: TeamAI shows the tickets, it never redeems one.
+export interface ResetCredits {
+  general: number; // clears the whole weekly limit
+  fable: number; // clears the model-scoped (Fable) weekly window only
+  nextExpiry: number | null; // soonest expiry among the counted tickets
 }
 
 export interface SubscriptionProfile {
@@ -88,6 +98,7 @@ export interface AccountRuntimeState {
   // (response headers, the usage endpoint, a probe). The dashboard shows their
   // age so a number nobody has re-read does not pass for a live one.
   measuredAt?: number | null;
+  resetCredits?: ResetCredits | null;
 }
 
 export interface PersistedState {
@@ -114,6 +125,7 @@ export interface RuntimeAccount extends StoredAccount {
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
   measuredAt: number | null;
+  resetCredits?: ResetCredits | null;
   inflight: number;
 }
 

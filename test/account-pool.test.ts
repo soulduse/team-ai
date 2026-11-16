@@ -501,3 +501,16 @@ test('sweepExpired drops an inert window with no reset, keeping measured ones', 
   pool.sweepExpired();
   assert.deepEqual(Object.keys(pool.accounts[0]!.windows).sort(), ['7d', '7d_oi']);
 });
+
+test('reset tickets survive a restart: exportState → constructor', () => {
+  const win = { usage: 0.2, resetsAt: null, windows: { '7d': { usage: 0.2, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null };
+  const before = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, { version: 1, accounts: { 'codex:a': { ...win, resetCredits: { general: 1, fable: 3, nextExpiry: 5 } } } });
+  const saved: PersistedState = { version: 1, accounts: {} }; before.exportState(saved);
+  assert.deepEqual(saved.accounts['codex:a']?.resetCredits, { general: 1, fable: 3, nextExpiry: 5 });
+  const after = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, saved);
+  assert.deepEqual(after.accounts[0]?.resetCredits, { general: 1, fable: 3, nextExpiry: 5 });
+  // a reading without tickets keeps the last count
+  const p = new AccountPool({ ...provider, readQuota: () => ({ routingUsage: 0.3, routingResetsAt: null, windows: {} }) }, [account('a')], { 'codex:a': credential('a') }, saved);
+  p.updateQuota(p.accounts[0]!, new Headers());
+  assert.deepEqual(p.accounts[0]?.resetCredits, { general: 1, fable: 3, nextExpiry: 5 });
+});
