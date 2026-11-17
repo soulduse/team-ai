@@ -11,6 +11,7 @@ import { captureDashboard } from './capture.js';
 import { relayedCodexConfig } from './codex-config.js';
 import { launchCommand } from './launch.js';
 import { isRedactLevel } from './redact.js';
+import { buildUsageReport, formatUsageTable, type UsageReport } from './usage.js';
 import { releaseServerFile, runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, paths, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
     case 'server': await runServer(); break;
     case 'start': await ensureServer(); await runTui(); break;
     case 'status': await status(); break;
+    case 'usage': await usage(); break;
     case 'stop': await stop(); break;
     case 'restart': await stop(true); await ensureServer(); await runTui(); break;
     case 'session': await runClient(await selectProvider('Select session'), args.filter((x) => x !== '--')); break;
@@ -69,6 +71,22 @@ async function accounts(filter?: ProviderId): Promise<void> {
 }
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
 async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }
+
+// Live from the server's control port when it answers, else the same report
+// built from state.json — so the command works whether or not a relay runs.
+async function usage(): Promise<void> {
+  const level = flag('--redact') ?? 'partial'; if (!isRedactLevel(level)) throw new Error('--redact must be partial, full or none');
+  const config = await loadConfig(); let report: UsageReport | null = null;
+  if (await runningPid()) {
+    try {
+      const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
+      const response = await fetch(`http://${config.proxy.host}:${port}/usage?redact=${level}`, { headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(3_000) });
+      if (response.ok) report = await response.json() as UsageReport;
+    } catch { /* an older server without /usage, or a busy one: fall back to state.json */ }
+  }
+  report ??= buildUsageReport(config, await loadState(), { source: 'state', level });
+  console.log(args.includes('--json') ? JSON.stringify(report, null, 2) : formatUsageTable(report));
+}
 
 async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); }
 // A clean stop drains for up to 5s and saves for up to 2×5s (runtime.ts). The
@@ -166,6 +184,9 @@ Usage:
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
   teamai start|restart|status|stop
+  teamai usage [--json] [--redact partial|full|none]
+                                       Quota per account and window, live from
+                                       the server (or state.json if it is down)
   teamai enable|disable <provider> <account>
   teamai priority <provider> <account> <rank|auto>
   teamai capture [--redact partial|full|none] [--out DIR]

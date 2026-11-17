@@ -1,4 +1,4 @@
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import type { LiveAccountStatus, OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
 // An empty exclusion set, for judging an account on its own merits rather than
 // on what one request has already tried.
@@ -672,6 +672,12 @@ export class AccountPool {
       } catch { /* retain last known profile */ }
     }
     return updated;
+  }
+
+  // What `GET /usage` adds to the persisted state: in-flight requests and the
+  // reason behind a cooldown, which only this process knows.
+  liveStatus(): LiveAccountStatus[] {
+    return this.accounts.map((a) => ({ credentialId: a.credentialId, inflight: a.inflight, cooldownUntil: a.cooldownUntil, cooldownReason: a.cooldownReason }));
   }
 
   exportState(target: PersistedState): void {

@@ -117,6 +117,15 @@ export interface RuntimeAccount extends StoredAccount {
   inflight: number;
 }
 
+// What only the running server knows: requests in flight and why an account
+// is benched. state.json carries neither.
+export interface LiveAccountStatus {
+  credentialId: string;
+  inflight: number;
+  cooldownUntil: number | null;
+  cooldownReason: RuntimeAccount['cooldownReason'];
+}
+
 export interface FailureDecision {
   // 'quota' benches the whole account; 'model-quota' means only the
   // model-weekly (Fable) budget is spent, so the account still serves every
