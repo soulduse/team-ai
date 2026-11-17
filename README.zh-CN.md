@@ -220,7 +220,7 @@ JSON（节选）：
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
 ```
 
-在用 `tac` 启动的会话中，`$ANTHROPIC_AUTH_TOKEN` 就是这个令牌。其他地方用 `teamai usage --json` 更简单，它会自己从配置读取令牌。
+`3556` 是 `proxy.controlPort` 的默认值；如果改过，请用你设置的值（`jq .proxy.controlPort ~/.config/teamai/config.json`）。在用 `tac` 启动的会话中，`$ANTHROPIC_AUTH_TOKEN` 就是这个令牌。其他地方用 `teamai usage --json` 更简单，它会自己从配置读取令牌。
 
 ### 可以这样用
 
@@ -244,7 +244,9 @@ done
 ```bash
 #!/bin/sh
 # ~/.claude/teamai-statusline.sh
-curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" http://127.0.0.1:3556/usage |
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
   jq -r '.providers.claude.summary |
     "TeamAI \(.available)/\(.enabled) free" +
     (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'

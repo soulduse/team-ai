@@ -277,7 +277,7 @@ the relay's client token like everything else there:
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
 ```
 
-Inside a session started with `tac`, `$ANTHROPIC_AUTH_TOKEN` already holds that
+`3556` is the default `proxy.controlPort`; if you changed it, use your value (`jq .proxy.controlPort ~/.config/teamai/config.json`). Inside a session started with `tac`, `$ANTHROPIC_AUTH_TOKEN` already holds that
 token. Elsewhere, `teamai usage --json` is simpler: it reads the token from your
 config itself.
 
@@ -307,7 +307,9 @@ it stays fast:
 ```bash
 #!/bin/sh
 # ~/.claude/teamai-statusline.sh
-curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" http://127.0.0.1:3556/usage |
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
   jq -r '.providers.claude.summary |
     "TeamAI \(.available)/\(.enabled) free" +
     (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'

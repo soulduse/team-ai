@@ -272,7 +272,7 @@ El mismo informe se sirve en el puerto de control, ligado a `127.0.0.1` y proteg
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
 ```
 
-Dentro de una sesión iniciada con `tac`, `$ANTHROPIC_AUTH_TOKEN` ya contiene ese token. En cualquier otro sitio, `teamai usage --json` es más sencillo: lee el token de tu configuración por sí mismo.
+`3556` es el valor por defecto de `proxy.controlPort`; si lo cambiaste, usa el tuyo (`jq .proxy.controlPort ~/.config/teamai/config.json`). Dentro de una sesión iniciada con `tac`, `$ANTHROPIC_AUTH_TOKEN` ya contiene ese token. En cualquier otro sitio, `teamai usage --json` es más sencillo: lee el token de tu configuración por sí mismo.
 
 ### Formas de usarlo
 
@@ -296,7 +296,9 @@ done
 ```bash
 #!/bin/sh
 # ~/.claude/teamai-statusline.sh
-curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" http://127.0.0.1:3556/usage |
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
   jq -r '.providers.claude.summary |
     "TeamAI \(.available)/\(.enabled) free" +
     (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'

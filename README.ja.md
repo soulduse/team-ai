@@ -220,7 +220,7 @@ JSON（一部省略）：
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
 ```
 
-`tac` で起動したセッションの中では `$ANTHROPIC_AUTH_TOKEN` がそのトークンです。それ以外の場所では、トークンを設定から自分で読む `teamai usage --json` の方が簡単です。
+`3556` は `proxy.controlPort` の既定値です。変更している場合はその値を使ってください（`jq .proxy.controlPort ~/.config/teamai/config.json`）。`tac` で起動したセッションの中では `$ANTHROPIC_AUTH_TOKEN` がそのトークンです。それ以外の場所では、トークンを設定から自分で読む `teamai usage --json` の方が簡単です。
 
 ### こんな使い方ができます
 
@@ -244,7 +244,9 @@ done
 ```bash
 #!/bin/sh
 # ~/.claude/teamai-statusline.sh
-curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" http://127.0.0.1:3556/usage |
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
   jq -r '.providers.claude.summary |
     "TeamAI \(.available)/\(.enabled) free" +
     (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'
