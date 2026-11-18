@@ -5,7 +5,19 @@
 import type { PersistedState, StoredAccount, ResetCredits, SubscriptionProfile, TeamAIConfig } from './types.js';
 
 export const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
-const color = (code: number, text: string): string => `${ESC}${code}m${text}${RESET}`;
+// Green, yellow and red are drawn as explicit colors rather than the
+// terminal's numbered ones: many themes render ANSI green as olive, which made
+// every healthy gauge look yellowish. 24-bit where the terminal says it can
+// (COLORTERM), the nearest 256-color entry otherwise. Other codes stay themed.
+type Tone = { rgb: readonly [number, number, number]; xterm: number };
+const TONES: Record<string, Tone> = {
+  fg31: { rgb: [235, 100, 100], xterm: 203 }, fg32: { rgb: [92, 200, 130], xterm: 78 }, fg33: { rgb: [230, 180, 70], xterm: 179 },
+  bgOk: { rgb: [46, 140, 84], xterm: 29 }, bgWarn: { rgb: [190, 135, 35], xterm: 136 }, bgFull: { rgb: [192, 68, 68], xterm: 167 },
+  bgEmpty: { rgb: [66, 70, 78], xterm: 238 }, fgEmpty: { rgb: [200, 204, 212], xterm: 252 },
+};
+const truecolor = (): boolean => /truecolor|24bit/i.test(process.env.COLORTERM ?? '');
+const tone = (layer: 38 | 48, name: string): string => { const t = TONES[name]!; return truecolor() ? `${layer};2;${t.rgb.join(';')}` : `${layer};5;${t.xterm}`; };
+const color = (code: number, text: string): string => `${ESC}${TONES[`fg${code}`] ? tone(38, `fg${code}`) : code}m${text}${RESET}`;
 const visible = (text: string): number => text.replace(ANSI, '').length;
 const fit = (text: string, width: number): string => { const plain = text.replace(ANSI, ''); if (plain.length > width) return `${plain.slice(0, Math.max(0, width - 1))}…`; return text + ' '.repeat(Math.max(0, width - visible(text))); };
 
@@ -20,9 +32,10 @@ function bar(usage: number | null | undefined, reset: number | null | undefined,
   const remaining = duration(reset); const ratio = usage == null ? null : Math.max(0, Math.min(1, usage));
   const label = ratio == null ? (remaining || '-') : `${Math.round(ratio * 100)}%${remaining && `${Math.round(ratio * 100)}% ${remaining}`.length <= width ? ` ${remaining}` : ''}`;
   const text = label.slice(0, width).padStart(Math.floor((width + label.length) / 2)).padEnd(width);
-  if (ratio == null) return `${ESC}100;37m${text}${RESET}`;
-  const filled = Math.round(ratio * width); const bg = ratio >= 0.9 ? 41 : ratio >= 0.7 ? 43 : 42;
-  return `${ESC}${bg};97m${text.slice(0, filled)}${ESC}100;37m${text.slice(filled)}${RESET}`;
+  const empty = `${ESC}${tone(48, 'bgEmpty')};${tone(38, 'fgEmpty')}m`;
+  if (ratio == null) return `${empty}${text}${RESET}`;
+  const filled = Math.round(ratio * width); const bg = tone(48, ratio >= 0.9 ? 'bgFull' : ratio >= 0.7 ? 'bgWarn' : 'bgOk');
+  return `${ESC}${bg};97m${text.slice(0, filled)}${empty}${text.slice(filled)}${RESET}`;
 }
 
 // How old a row's figures are. Headers refresh only the accounts the proxy
