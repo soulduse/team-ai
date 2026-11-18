@@ -84,15 +84,30 @@ test('a state save superseded by a later one is not written', async () => {
   delete process.env.TEAMAI_HOME;
 });
 
-// The profile endpoint as Claude serves it: which organization each token belongs to.
-function profileServer(orgOf: Record<string, string>): () => void {
+// Claude's profile and token endpoints: which organization each access token
+// belongs to, and what each refresh token renews to. A refresh token missing
+// from `renewals` is refused with invalid_grant; `offline` makes every call
+// fail the way an unreachable host does.
+function profileServer(orgOf: Record<string, string>, renewals: Record<string, string> = {}, offline = false): () => void {
   const original = globalThis.fetch;
-  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    if (offline) throw new TypeError('fetch failed');
+    if (String(url).endsWith('/v1/oauth/token')) {
+      const refresh = JSON.parse(String(init?.body)).refresh_token as string;
+      const access = renewals[refresh];
+      return access ? new Response(JSON.stringify({ access_token: access, refresh_token: `${refresh}-rotated`, expires_in: 3600 })) : new Response('{"error":"invalid_grant"}', { status: 400 });
+    }
     const token = String(new Headers(init?.headers).get('authorization')).replace('Bearer ', '');
     const org = orgOf[token];
     return org ? new Response(JSON.stringify({ account: { uuid: 'person', email: 'me@corp.com' }, organization: { uuid: org } })) : new Response('{}', { status: 401 });
   }) as typeof fetch;
   return () => { globalThis.fetch = original; };
+}
+
+// A record written before the organization joined the key: id is the bare account uuid.
+async function legacyRecord(storage: typeof import('../src/storage.js'), accessToken: string, refreshToken: string): Promise<string> {
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken, refreshToken, expiresAt: 1, accountId: 'person' });
+  return (await storage.loadConfig()).accounts[0]!.credentialId;
 }
 
 test('keeps a personal plan and a Team seat under one email as separate Claude accounts', async () => {
@@ -124,12 +139,43 @@ test('upgrades a person-keyed Claude record for the same organization and leaves
   delete process.env.TEAMAI_HOME;
 });
 
-test('does not overwrite a person-keyed Claude record whose token can no longer name its organization', async (t) => {
+test('renews an expired person-keyed Claude record to name its organization', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'teamai-storage-')); process.env.TEAMAI_HOME = root;
+  t.after(profileServer({ renewed: 'org-team' }, { 'r-team': 'renewed' }));
+  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-renew`);
+  const legacyId = await legacyRecord(storage, 'expired', 'r-team');
+  // Another organization: a row of its own, and the held record keeps the
+  // renewal, since the refresh token it was stored with is now spent.
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'personal', refreshToken: 'r-personal', expiresAt: 1, accountId: 'person', organizationId: 'org-personal' });
+  assert.equal((await storage.loadConfig()).accounts.length, 2);
+  const held = (await storage.loadCredentials())[legacyId];
+  assert.equal(held.refreshToken, 'r-team-rotated'); assert.equal(held.organizationId, 'org-team');
+  // The same organization: adopted.
+  await storage.upsertAccount('claude', 'me@corp.com (Team)', { accessToken: 'team2', refreshToken: 'r-team2', expiresAt: 2, accountId: 'person', organizationId: 'org-team' });
+  const config = await storage.loadConfig();
+  assert.equal(config.accounts.length, 2);
+  assert.equal(config.accounts.find((a: { credentialId: string }) => a.credentialId === legacyId).id, 'person:org-team');
+  assert.equal((await storage.loadCredentials())[legacyId].refreshToken, 'r-team2');
+  delete process.env.TEAMAI_HOME;
+});
+
+test('a re-login takes over a person-keyed Claude record whose token cannot be renewed', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'teamai-storage-')); process.env.TEAMAI_HOME = root;
   t.after(profileServer({}));
-  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-unknown`);
-  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'expired', refreshToken: 'r-old', expiresAt: 1, accountId: 'person' });
-  const legacyId = (await storage.loadConfig()).accounts[0].credentialId;
+  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-lost`);
+  const legacyId = await legacyRecord(storage, 'expired', 'r-revoked');
+  await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'new', refreshToken: 'r-new', expiresAt: 1, accountId: 'person', organizationId: 'org-personal' });
+  const config = await storage.loadConfig();
+  assert.equal(config.accounts.length, 1); assert.equal(config.accounts[0].credentialId, legacyId); assert.equal(config.accounts[0].id, 'person:org-personal');
+  assert.equal((await storage.loadCredentials())[legacyId].refreshToken, 'r-new');
+  delete process.env.TEAMAI_HOME;
+});
+
+test('does not overwrite a person-keyed Claude record when upstream cannot be reached', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'teamai-storage-')); process.env.TEAMAI_HOME = root;
+  t.after(profileServer({}, {}, true));
+  const storage = await import(`../src/storage.js?test=${Date.now()}-claude-offline`);
+  const legacyId = await legacyRecord(storage, 'held', 'r-old');
   await storage.upsertAccount('claude', 'me@corp.com', { accessToken: 'new', refreshToken: 'r-new', expiresAt: 1, accountId: 'person', organizationId: 'org-personal' });
   assert.equal((await storage.loadConfig()).accounts.length, 2); assert.equal((await storage.loadCredentials())[legacyId].refreshToken, 'r-old');
   delete process.env.TEAMAI_HOME;

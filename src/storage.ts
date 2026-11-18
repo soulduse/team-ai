@@ -78,16 +78,25 @@ async function legacyAccount(config: TeamAIConfig, credentials: Record<string, O
 }
 
 // Claude accounts stored before the organization joined the key are keyed by
-// the person alone. Such a record is adopted only when its token belongs to the
-// same organization. A Claude token is opaque, so that takes a profile call;
-// when the held token cannot answer, the login gets a row of its own — a
-// duplicate can be disabled, an overwritten subscription cannot be recovered.
+// the person alone. Such a record is adopted when its token belongs to the same
+// organization, or when its token can no longer be renewed: a re-login usually
+// follows exactly that, and keeping the dead record beside the new one would
+// leave a duplicate that only errors. A Claude token is opaque, so telling
+// takes a profile call; only when upstream cannot be reached does the login get
+// a row of its own — a duplicate can be disabled, an overwritten subscription
+// cannot be recovered.
 async function legacyClaudeAccount(config: TeamAIConfig, credentials: Record<string, OAuthCredential>, provider: ProviderId, credential: OAuthCredential): Promise<StoredAccount | undefined> {
   for (const a of config.accounts) {
     if (a.provider !== provider || a.id !== credential.accountId) continue;
     const held = credentials[a.credentialId]; if (!held) continue;
-    const heldOrganization = held.organizationId ?? await claudeOrganization(held.accessToken);
-    if (heldOrganization === credential.organizationId) return a;
+    if (held.organizationId) { if (held.organizationId === credential.organizationId) return a; continue; }
+    const found = await claudeOrganization(held);
+    if (found === 'lost') return a;
+    if (found === 'unknown') continue;
+    // A renewal spent the stored refresh token, so the renewed credential is
+    // kept even when this login turns out to be another organization's.
+    if (found.renewed) credentials[a.credentialId] = { ...found.renewed, ...(found.organizationId ? { organizationId: found.organizationId } : {}) };
+    if (found.organizationId === credential.organizationId) return a;
   }
   return undefined;
 }

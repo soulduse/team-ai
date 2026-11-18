@@ -70,7 +70,7 @@ function sessionId(value: unknown): string | null { return typeof value === 'str
 
 async function tokenRefresh(url: string, contentType: string, body: string): Promise<Record<string, unknown>> {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': contentType, accept: 'application/json' }, body, signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`OAuth refresh failed (${response.status})`);
+  if (!response.ok) throw Object.assign(new Error(`OAuth refresh failed (${response.status})`), { status: response.status });
   return await response.json() as Record<string, unknown>;
 }
 

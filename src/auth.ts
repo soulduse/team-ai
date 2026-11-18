@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
 import { openInBrowser } from './desktop.js';
 import { launchCommand } from './launch.js';
+import { claudeProvider } from './providers.js';
 import type { OAuthCredential, ProviderId } from './types.js';
 
 function expand(path: string): string { return path.startsWith('~/') ? join(homedir(), path.slice(2)) : resolve(path); }
@@ -66,7 +67,7 @@ const ORG_KINDS: Record<string, string> = { claude_team: 'Team', claude_enterpri
 
 async function claudeProfile(accessToken: string): Promise<{ id: string; label: string; organizationId: string | null }> {
   const response = await fetch('https://api.anthropic.com/api/oauth/profile', { headers: { authorization: `Bearer ${accessToken}`, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new Error(`Claude profile failed (${response.status})`);
+  if (!response.ok) throw Object.assign(new Error(`Claude profile failed (${response.status})`), { status: response.status });
   const value = await response.json() as { account?: { uuid?: string; email?: string }; organization?: { uuid?: string; organization_type?: string } };
   if (!value.account?.uuid) throw new Error('Claude account UUID is missing');
   const kind = ORG_KINDS[value.organization?.organization_type ?? ''];
@@ -74,10 +75,23 @@ async function claudeProfile(accessToken: string): Promise<{ id: string; label: 
   return { id: value.account.uuid, label: kind ? `${label} (${kind})` : label, organizationId: value.organization?.uuid ?? null };
 }
 
-// The organization a stored Claude token belongs to, for records saved before
-// the organization was kept. Null when the token can no longer say.
-export async function claudeOrganization(accessToken: string): Promise<string | null> {
-  try { return (await claudeProfile(accessToken)).organizationId; } catch { return null; }
+// Upstream turned the token down, as opposed to not answering at all.
+const refused = (error: unknown): boolean => [400, 401, 403].includes((error as { status?: number } | null)?.status ?? 0);
+
+// The organization a stored Claude credential belongs to, for records saved
+// before the organization was kept. An idle record's access token has usually
+// lapsed, so a refused token is renewed once and asked again; the renewed
+// credential comes back with the answer, because the refresh token it replaced
+// is spent and the caller must keep the new one. 'lost' when the renewal is
+// refused too: that credential can no longer serve, so nothing is lost by
+// replacing it. 'unknown' when upstream could not be reached to say.
+export type HeldOrganization = { organizationId: string | null; renewed?: OAuthCredential } | 'lost' | 'unknown';
+export async function claudeOrganization(credential: OAuthCredential): Promise<HeldOrganization> {
+  try { return { organizationId: (await claudeProfile(credential.accessToken)).organizationId }; } catch (error) { if (!refused(error)) return 'unknown'; }
+  if (!credential.refreshToken) return 'lost';
+  let renewed: OAuthCredential;
+  try { renewed = await claudeProvider.refresh(credential); } catch (error) { return refused(error) ? 'lost' : 'unknown'; }
+  try { return { organizationId: (await claudeProfile(renewed.accessToken)).organizationId, renewed }; } catch { return { organizationId: null, renewed }; }
 }
 
 export async function loginClaude(): Promise<{ label: string; credential: OAuthCredential }> {
