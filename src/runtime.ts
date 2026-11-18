@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, readCredentialsText, saveCredentialsIfUnchanged, saveState } from './storage.js';
 import type { OAuthCredential, PersistedState, ProviderId, TeamAIConfig } from './types.js';
+import { buildUsageReport, requestUrl, serveUsage } from './usage.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
 const DRAIN_MS = 5_000;
@@ -138,6 +139,19 @@ export async function runServer(): Promise<void> {
   const control = createServer(async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
     if (!secureEqual(token, config.proxy.clientToken)) { res.writeHead(401).end('{}'); return; }
+    // Read-only usage report for other sessions and scripts. Answered before
+    // the /probe branch: it must not sync the fleet or spend a probe.
+    const url = requestUrl(req);
+    if (!url) { res.writeHead(400).end('{}'); return; }
+    if (req.method === 'GET' && url.pathname === '/usage') {
+      await serveUsage(url, res, async (level) => {
+        const snapshot: PersistedState = { version: 1, accounts: {} }; pools.forEach((p) => p.exportState(snapshot));
+        // Labels, enabled flags and the switch threshold can change under a
+        // running server (the TUI edits config.json), so read them fresh.
+        return buildUsageReport(await loadConfig(), snapshot, { source: 'live', level, live: pools.flatMap((p) => p.liveStatus()) });
+      });
+      return;
+    }
     if (!req.url?.startsWith('/probe')) { res.writeHead(404).end('{}'); return; }
     // Pick up accounts added or removed by the TUI (a separate process) before
     // measuring, so `R` reflects the current fleet without a server restart.

@@ -159,6 +159,7 @@ teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # or: auto
 teamai fable-only claude user@example.com on  # or: off
 teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png, no TTY needed
+teamai usage [--json] [--redact partial|full|none]       # quota per account and window, as a table or JSON
 ```
 
 Accounts are ordered by how much quota they have left, least-spent first, in
@@ -209,6 +210,127 @@ If more requests arrive at once than the fleet's combined per-account concurrenc
 
 The `~D-N` subscription value is an estimate, not an authoritative expiry date: Anthropic's profile endpoint exposes subscription status and creation time, but no current billing-period end. TeamAI therefore estimates the next monthly billing anniversary and marks it with `~`. Profile state is refreshed at server startup and every six hours.
 
+## Checking usage from other sessions and scripts
+
+The dashboard is for you; `teamai usage` is the same data for everything else —
+another Claude Code or Codex session, a shell script, a status line, an agent
+deciding whether to start a long job.
+
+```bash
+teamai usage                    # table: every account, every window, time to reset
+teamai usage --json             # the same as JSON
+teamai usage --json --redact full   # accounts as "account #N"
+```
+
+```text
+TeamAI usage (live from the server, 2026-11-17T02:17:41.007Z)
+
+claude: 3/9 available, next reset 9h43m
+  ○ account #1  7d 98% (2d15h)  7d_oi 100% (2d15h)
+  ● account #5  7d 5% (6d17h)  7d_oi 8% (6d17h)
+  ● account #6  7d 35% (3d11h)  7d_oi 69% (3d11h)  [2 in flight]
+
+codex: 1/1 available, next reset 1d5h
+  ● account #8  primary 37% (1d5h)  secondary 0%
+```
+
+When the relay is running, the report comes live from its pools, including
+requests in flight and why an account is cooling down. When it is not (or is an
+older version without the endpoint), the same report is built from
+`state.json`, and `source` says which one you got. Nothing is measured to answer
+it: it reads what the relay already knows and spends no quota, so it is safe to
+call as often as you like.
+
+The JSON, abridged:
+
+```json
+{
+  "source": "live",
+  "generatedAt": "2026-11-17T02:17:41.007Z",
+  "providers": {
+    "claude": {
+      "summary": { "accounts": 9, "enabled": 9, "available": 3, "nextResetAt": "2026-11-17T12:00:00.475Z" },
+      "accounts": [{
+        "id": "…", "label": "de•••••••••w@gm•••.com", "enabled": true, "priority": null,
+        "plan": "default_claude_max_20x", "usage": 0.05,
+        "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
+                     "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
+        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "error": null, "inflight": 0, "available": true
+      }]
+    },
+    "codex": { "summary": { "…": "…" }, "accounts": [] }
+  }
+}
+```
+
+`usage` is a share from 0 to 1. Window names are the ones upstream reports:
+Claude's `7d` (overall weekly), `7d_oi` (the top model's weekly) and `5h` while
+it still exists; Codex's `primary` and `secondary`. `available` means enabled,
+not erroring, not cooling down, and under `switchThreshold`. `inflight` is
+`null` when the report came from `state.json`. Account addresses are masked as
+in captures (`--redact`); tokens and credentials are never part of the report.
+
+### The HTTP endpoint
+
+The same report is served on the control port, bound to `127.0.0.1` and gated by
+the relay's client token like everything else there:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
+```
+
+`3556` is the default `proxy.controlPort`; if you changed it, use your value (`jq .proxy.controlPort ~/.config/teamai/config.json`). Inside a session started with `tac`, `$ANTHROPIC_AUTH_TOKEN` already holds that
+token. Elsewhere, `teamai usage --json` is simpler: it reads the token from your
+config itself.
+
+### Ways to use it
+
+**Ask before a long job.** An agent, or a script, can check headroom before
+starting something that will burn through a lot of quota:
+
+```bash
+available=$(teamai usage --json | jq '.providers.claude.summary.available')
+[ "$available" -gt 0 ] || { echo "No Claude account free right now"; exit 1; }
+```
+
+**Wait for a reset instead of failing.** A batch job can sleep until the
+soonest window rolls over:
+
+```bash
+until [ "$(teamai usage --json | jq '.providers.claude.summary.available')" -gt 0 ]; do
+  sleep 600
+done
+```
+
+**Show it in Claude Code's status line.** Point `statusLine` in
+`~/.claude/settings.json` at a small script; it reads the endpoint directly so
+it stays fast:
+
+```bash
+#!/bin/sh
+# ~/.claude/teamai-statusline.sh
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
+  jq -r '.providers.claude.summary |
+    "TeamAI \(.available)/\(.enabled) free" +
+    (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'
+```
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claude/teamai-statusline.sh" } }
+```
+
+**Tell an agent about it.** Add a line to your project's `CLAUDE.md` or
+`AGENTS.md` — "Before a long or parallel job, run `teamai usage --json` and
+check `providers.claude.summary.available`" — and every session in that project
+can see how much room the fleet has, without opening the dashboard.
+
+**Alert when the fleet runs dry.** A cron job or a LaunchAgent can poll the
+summary and send a notification when `available` drops to 0, or list the
+accounts whose `error` is set so you know which ones need `teamai login` again.
+
 ## Configuration
 
 Configuration and credentials live in `$TEAMAI_HOME`, falling back to
@@ -222,7 +344,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `proxy.host` | `127.0.0.1` | Bind address. Loopback only by design. |
 | `proxy.claudePort` | `3456` | Claude relay port. |
 | `proxy.codexPort` | `3457` | Codex relay port. |
-| `proxy.controlPort` | `3556` | Control channel the TUI talks to. |
+| `proxy.controlPort` | `3556` | Control channel the TUI and `teamai usage` talk to (`/probe`, `GET /usage`). |
 | `proxy.clientToken` | generated | Local token every relayed client must send. |
 | `switchThreshold` | `0.98` | Usage ratio above which an account stops being selected. |
 | `warmupIntervalMs` | `300000` | Background re-measure interval. `0` disables it. |
