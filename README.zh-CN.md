@@ -148,6 +148,8 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只�
 
 **Fable 专用账号。** 默认对所有账号关闭。`teamai fable-only claude <账号> on` 把一个 Claude 账号设为 Fable 专用。只要该账号的按模型周（Fable）窗口还有额度，所有 Fable 请求都会先发往它——优先于其他任何账号，包括固定优先级——且不会把其他模型（Opus、Sonnet、Haiku）的请求路由给它（只有中继自身的后台额度探测例外）。Fable 额度最多为周上限的一半，窗口用完后该账号剩余的周额度就会闲置，所以此后 Fable 会转到其他账号，而 Fable 专用账号像普通账号一样处理其他模型。保留期间仪表盘状态显示为 `fable`。正在运行的中继会在仪表盘按 `R` 或执行 `teamai restart` 后生效。
 
+**限额重置券。** Claude 可能会给账号发放限额重置券。`resets` 列和 `teamai accounts` 显示每个账号持有的数量：`R<n>` 重置整个周限额，`F<n>` 只重置 Fable 窗口。数据来自中继已经发送的用量请求（`?cedar_ember=1`）；TeamAI 只显示、从不使用重置券——请在 Claude 中自行使用。只有当某个账号持有重置券且该行仍能放进终端宽度时才显示此列。超过一天未重新读取的数量可能已被使用，因此会变暗显示（`teamai accounts` 中标为 `, stale`）。如果某个账号的重置券请求被拒绝而普通读取正常，中继会对该账号按普通方式只读取额度，并在六小时内不再为它请求重置券。
+
 全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `7d overall` 以及按模型划分的 `7d Fable` 窗口（Claude 已于 2026 年 11 月把 5 小时会话限额并入每周限额，因此只有当某个账号仍上报有效的 5 小时窗口时才会出现 `5h session` 列）；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
 
 底栏提供与 TeamClaude 相同的账号操作流程：启动 Claude/Codex、选择、切换、启用／禁用、排序、删除、添加／登录、重新测量（`R`）以及退出。`switch` 会把选中的账号固定到其所属服务商账号池的最前面；排序模式下可以指定名次，也可以把某个账号交回自动调度。刷新 Claude 资料时会显示套餐等级（`Ultra`（原 Max 20x）、`Max 5x`、`Pro`；TeamAI 不认识的等级按上报的名称显示，而不是 `OAuth`），并以红色标出 `past_due` 这类异常的订阅状态。
@@ -204,7 +206,7 @@ JSON（节选）：
         "plan": "default_claude_max_20x", "usage": 0.05,
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
-        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
         "error": null, "inflight": 0, "available": true
       }]
     },
@@ -213,7 +215,7 @@ JSON（节选）：
 }
 ```
 
-`usage` 是 0 到 1 之间的比例。窗口名称与上游报告的一致：Claude 为 `7d`（总体周额度）、`7d_oi`（顶级模型周额度），以及仍存在时的 `5h`；Codex 为 `primary` 和 `secondary`。`available` 表示已启用、无错误、未在冷却且低于 `switchThreshold`。报告来自 `state.json` 时 `inflight` 为 `null`。账号地址的遮蔽方式与截图相同（`--redact`），令牌和凭据永远不会出现在报告中。
+`usage` 是 0 到 1 之间的比例。窗口名称与上游报告的一致：Claude 为 `7d`（总体周额度）、`7d_oi`（顶级模型周额度），以及仍存在时的 `5h`；Codex 为 `primary` 和 `secondary`。`available` 表示已启用、无错误、未在冷却且低于 `switchThreshold`。报告来自 `state.json` 时 `inflight` 为 `null`。`resetTickets` 对 Codex 账号和从未读取到重置券的 Claude 账号为 `null`，否则为 `{ general, fable, nextExpiry, readAt, stale }`，其中 `stale` 表示该数量已超过一天未更新。账号地址的遮蔽方式与截图相同（`--redact`），令牌和凭据永远不会出现在报告中。
 
 ### HTTP 端点
 

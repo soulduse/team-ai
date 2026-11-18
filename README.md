@@ -192,6 +192,8 @@ shared window benches the account as usual.
 
 **Fable-only accounts.** Off by default for every account: `teamai fable-only claude <account> on` turns one Claude account into the home for Fable. While its model-weekly (Fable) window still has budget, every Fable request goes there first — ahead of any other account, even a pinned priority — and no request for another model (Opus, Sonnet, Haiku) is routed to it (only the relay's own background quota probes may touch it). Fable's allowance is at most half of the weekly limit, so once that window is spent the rest of the account's week would sit idle: from then on Fable spills to the other accounts and the fable-only account serves every other model like any other. The dashboard shows its state as `fable` while it is reserved. A running relay picks the change up on `R` in the dashboard or `teamai restart`.
 
+**Limit-reset tickets.** Claude may grant an account limit-reset tickets. The `resets` column and `teamai accounts` show how many each account holds: `R<n>` resets the whole weekly limit, `F<n>` only the Fable window. They are read from the same usage request the relay already makes (`?cedar_ember=1`); TeamAI only displays them and never redeems one — use them from Claude itself. The column appears only when some account holds tickets and the row still fits the terminal width. A count nobody has re-read in a day may already be spent, so it is dimmed (`, stale` in `teamai accounts`). If upstream refuses the ticket request for an account while the plain read works, the relay reads that account's quota the plain way and stops asking it for tickets for six hours.
+
 The full-screen TUI groups Claude and Codex accounts and keeps the currently selected account anchored even when usage changes. Claude rows show the `7d overall` and model-scoped `7d Fable` windows independently — Claude folded its 5-hour session limit into the weekly one in November 2026, so a `5h session` column appears only while some account still reports a live 5-hour window; Codex rows show its primary and secondary windows, each titled with the span that account actually reports (`1w limit`). Quotas are learned from official-client responses and retained across restarts.
 
 The footer exposes the same account workflow as TeamClaude: launch Claude/Codex, select, switch, enable/disable, order, delete, add/login, re-measure (`R`), and quit. `switch` pins the selected account to the front of its provider pool; order mode can assign a rank or return an account to automatic scheduling. Claude profile refreshes show the plan tier (`Ultra` (formerly Max 20x), `Max 5x`, `Pro`; a tier TeamAI does not recognise is shown by its reported name rather than as `OAuth`) and unhealthy subscription states such as `past_due` in red.
@@ -255,7 +257,7 @@ The JSON, abridged:
         "plan": "default_claude_max_20x", "usage": 0.05,
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
-        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
         "error": null, "inflight": 0, "available": true
       }]
     },
@@ -268,7 +270,7 @@ The JSON, abridged:
 Claude's `7d` (overall weekly), `7d_oi` (the top model's weekly) and `5h` while
 it still exists; Codex's `primary` and `secondary`. `available` means enabled,
 not erroring, not cooling down, and under `switchThreshold`. `inflight` is
-`null` when the report came from `state.json`. Account addresses are masked as
+`null` when the report came from `state.json`. `resetTickets` is `null` for Codex and for a Claude account never read with tickets; otherwise `{ general, fable, nextExpiry, readAt, stale }`, where `stale` means the counts are over a day old. Account addresses are masked as
 in captures (`--redact`); tokens and credentials are never part of the report.
 
 ### The HTTP endpoint

@@ -200,6 +200,8 @@ cuenta como de costumbre.
 
 **Cuentas solo Fable.** Desactivado por defecto en todas las cuentas: `teamai fable-only claude <cuenta> on` convierte una cuenta de Claude en la casa de Fable. Mientras su ventana semanal por modelo (Fable) tenga presupuesto, toda solicitud Fable va primero a ella —por delante de cualquier otra cuenta, incluso de una prioridad fijada— y no se le enruta ninguna solicitud de otro modelo (Opus, Sonnet, Haiku); solo los sondeos de cuota en segundo plano del propio relay pueden tocarla. La asignación de Fable es como mucho la mitad del límite semanal, así que cuando esa ventana se agota el resto de la semana de la cuenta quedaría ocioso: desde entonces Fable pasa a las demás cuentas y la cuenta solo Fable atiende los demás modelos como cualquier otra. El panel muestra su estado como `fable` mientras está reservada. Un relay en marcha aplica el cambio con `R` en el panel o con `teamai restart`.
 
+**Tickets de reinicio de límite.** Claude puede otorgar a una cuenta tickets de reinicio de límite. La columna `resets` y `teamai accounts` muestran cuántos tiene cada cuenta: `R<n>` reinicia todo el límite semanal y `F<n>` solo la ventana Fable. Se leen de la misma solicitud de uso que el relay ya hace (`?cedar_ember=1`); TeamAI solo los muestra y nunca canjea ninguno: úsalos desde Claude. La columna solo aparece cuando alguna cuenta tiene tickets y la fila todavía cabe en el ancho del terminal. Un recuento que nadie ha vuelto a leer en un día puede estar ya gastado, así que se atenúa (`, stale` en `teamai accounts`). Si el servidor rechaza la solicitud de tickets de una cuenta pero la lectura normal funciona, el relay lee la cuota de esa cuenta de la forma normal y deja de pedirle tickets durante seis horas.
+
 La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente la ventana `7d overall` y la ventana por modelo `7d Fable` (Claude integró su límite de sesión de 5 horas en el semanal en noviembre de 2026, así que la columna `5h session` solo aparece mientras alguna cuenta siga reportando una ventana de 5 horas activa); las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
 
 El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan (`Ultra` (antes Max 20x), `Max 5x`, `Pro`; un nivel que TeamAI no reconoce se muestra con el nombre reportado en lugar de `OAuth`) y, en rojo, los estados de suscripción problemáticos como `past_due`.
@@ -256,7 +258,7 @@ El JSON, abreviado:
         "plan": "default_claude_max_20x", "usage": 0.05,
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
-        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
         "error": null, "inflight": 0, "available": true
       }]
     },
@@ -265,7 +267,7 @@ El JSON, abreviado:
 }
 ```
 
-`usage` es una fracción entre 0 y 1. Los nombres de ventana son los que reporta upstream: en Claude `7d` (semanal general), `7d_oi` (semanal del modelo superior) y `5h` mientras exista; en Codex `primary` y `secondary`. `available` significa habilitada, sin error, sin cooldown y por debajo de `switchThreshold`. `inflight` es `null` cuando el informe viene de `state.json`. Las direcciones se enmascaran como en las capturas (`--redact`); los tokens y credenciales nunca forman parte del informe.
+`usage` es una fracción entre 0 y 1. Los nombres de ventana son los que reporta upstream: en Claude `7d` (semanal general), `7d_oi` (semanal del modelo superior) y `5h` mientras exista; en Codex `primary` y `secondary`. `available` significa habilitada, sin error, sin cooldown y por debajo de `switchThreshold`. `inflight` es `null` cuando el informe viene de `state.json`. `resetTickets` es `null` en Codex y en una cuenta de Claude cuyos tickets nunca se han leído; si no, es `{ general, fable, nextExpiry, readAt, stale }`, donde `stale` indica que el recuento tiene más de un día. Las direcciones se enmascaran como en las capturas (`--redact`); los tokens y credenciales nunca forman parte del informe.
 
 ### El endpoint HTTP
 

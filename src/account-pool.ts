@@ -40,7 +40,7 @@ export class AccountPool {
       // retry-after came back to park seven accounts across restarts. If the
       // account really is spent, the next request re-derives the right cooldown
       // (model-quota → Fable only, real quota → whole account).
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, resetCredits: saved?.resetCredits ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -358,6 +358,7 @@ export class AccountPool {
       if (/^7d_[a-z0-9]+$/i.test(name) && prev?.usage != null && prev.usage >= 1 && next.usage !== null && next.usage >= 0.99 && sameWindow) quota.windows[name] = { ...next, usage: 1 };
     }
     account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = Date.now();
+    if (quota.resetCredits !== undefined) account.resetCredits = quota.resetCredits;
   }
   cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
 
@@ -473,11 +474,12 @@ export class AccountPool {
         try {
           await this.refresh(account);
           const started = Date.now();
-          const quota = await this.provider.fetchUsage!(account.credential);
+          const quota = await this.provider.fetchUsage!(account.credential, this.probeTemplate?.userAgent ?? null);
           // A proxied response may have landed while this read was in flight;
           // its headers are newer than this snapshot, so they are kept.
           if (quota && (account.measuredAt ?? 0) < started) { this.applyQuota(account, quota); measured.add(account.id); }
-          else if (quota) measured.add(account.id);
+          // The tickets ride only on this read, never on response headers: keep them anyway.
+          else if (quota) { if (quota.resetCredits !== undefined) account.resetCredits = quota.resetCredits; measured.add(account.id); }
         } catch { /* a failed read leaves the account to the probe fallback */ }
       }));
     })();
@@ -703,7 +705,7 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
+    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, resetCredits: a.resetCredits ?? null, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
   }
 }

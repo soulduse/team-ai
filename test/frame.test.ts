@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFrame, claudeTier, displayOrder } from '../src/frame.js';
+import { buildFrame, claudeTier, displayOrder, resetTicketsNote } from '../src/frame.js';
+import { defaultConfig } from '../src/storage.js';
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
 function account(provider: 'claude' | 'codex', label: string, priority: number | null = null): StoredAccount {
@@ -89,4 +90,29 @@ test('claudeTier: Max multipliers, the Ultra rename, and unknown tiers shown as 
   assert.equal(claudeTier(p('default_claude_premium', 'claude_premium')), 'premium');
   assert.equal(claudeTier(p(null, 'claude_premium')), 'premium');
   assert.equal(claudeTier(p(null, null)), 'OAuth');
+});
+
+test('resets column: only when an account holds tickets and the row fits; dimmed when stale', () => {
+  const config = { ...defaultConfig(), accounts: [account('claude', 'c@example.com'), account('claude', 'd@example.com')] };
+  const state = usage({ 'c@example.com': 0.3, 'd@example.com': 0.3 });
+  const draw = (width: number) => buildFrame(config, state, { width, selectedId: null, mode: 'normal', message: '', sortByHeadroom: false });
+  assert.ok(!draw(120).map(plain).some((line) => line.includes('resets')));
+  state.accounts['cred-c@example.com']!.resetCredits = { general: 1, fable: 3, nextExpiry: null, readAt: Date.now() };
+  const wide = draw(120);
+  assert.ok(wide.map(plain).some((line) => line.includes('resets')));
+  assert.ok(wide.some((line) => line.includes('\x1b[36mR1 F3')));
+  assert.ok(!draw(100).map(plain).some((line) => line.includes('resets') || line.includes('R1 F3')));
+  // a live 5h session adds a gauge: the column shows only where the row still fits, and never clips it
+  state.accounts['cred-d@example.com']!.windows!['5h'] = { usage: 0.2, resetsAt: Date.now() + 3_600_000 };
+  for (const width of [110, 115, 118, 119, 120, 137]) {
+    const lines = draw(width).map(plain); const shown = lines.some((line) => line.includes('R1 F3'));
+    assert.equal(shown, width === 119 || width === 137, `width ${width}`);
+    if (shown) assert.ok(!lines.some((line) => line.includes('c@example.com') && line.endsWith('…')), `clipped at ${width}`);
+  }
+  delete state.accounts['cred-d@example.com']!.windows!['5h'];
+  state.accounts['cred-c@example.com']!.resetCredits = { general: 1, fable: 3, nextExpiry: null, readAt: Date.now() - 2 * 86_400_000 };
+  assert.ok(draw(120).some((line) => line.includes('\x1b[90mR1 F3')));
+  assert.equal(resetTicketsNote({ general: 1, fable: 0, nextExpiry: Date.parse('2026-12-10T22:00:00Z'), readAt: Date.now() }), ' resets R1 (first expires 2026-12-10)');
+  assert.equal(resetTicketsNote({ general: 0, fable: 2, nextExpiry: null }), ' resets F2, stale');
+  assert.equal(resetTicketsNote({ general: 0, fable: 0, nextExpiry: null, readAt: Date.now() }), '');
 });

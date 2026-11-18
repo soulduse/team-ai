@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
+import { resetTicketsNote } from './frame.js';
 import { relayedCodexConfig } from './codex-config.js';
 import { launchCommand } from './launch.js';
 import { isRedactLevel } from './redact.js';
@@ -68,7 +69,7 @@ async function selectProvider(promptLabel: string): Promise<ProviderId> {
 
 async function accounts(filter?: ProviderId): Promise<void> {
   const config = await loadConfig(); const state = await loadState();
-  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}${a.fableOnly ? ' (fable only)' : ''}`); }
+  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}${a.fableOnly ? ' (fable only)' : ''}${resetTicketsNote(s?.resetCredits)}`); }
 }
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
 async function fableOnly(): Promise<void> { const id = provider(args[0]); if (id !== 'claude') throw new Error('fable-only applies to Claude accounts only'); const mode = args.at(-1); const name = args.slice(1, -1).join(' '); if (mode !== 'on' && mode !== 'off') throw new Error('Use on or off'); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.fableOnly = mode === 'on' || undefined; await saveConfig(config); console.log(`Fable only ${mode}: ${account.label} (a running relay picks it up on R in the dashboard or teamai restart)`); }

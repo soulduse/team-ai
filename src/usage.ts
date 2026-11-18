@@ -6,10 +6,15 @@
 // account — so a credential can never ride along into the output.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { AccountPool } from './account-pool.js';
+import { resetTickets, resetTicketsStale } from './frame.js';
 import { isRedactLevel, maskLabel, redactor, type RedactLevel } from './redact.js';
 import type { LiveAccountStatus, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 
 export interface UsageWindowReport { usage: number | null; resetsAt: string | null; resetsInMs: number | null; minutes?: number | null }
+
+// Limit-reset tickets (Claude only): counts, not redeemed. `stale` when the counts
+// have not been re-read in a day, so they may already be spent.
+export interface UsageResetTicketsReport { general: number; fable: number; nextExpiry: string | null; readAt: string | null; stale: boolean }
 
 export interface UsageAccountReport {
   id: string;
@@ -20,6 +25,7 @@ export interface UsageAccountReport {
   usage: number | null;
   windows: Record<string, UsageWindowReport>;
   measuredAt: string | null;
+  resetTickets: UsageResetTicketsReport | null;
   cooldownUntil: string | null;
   cooldownReason: string | null;
   error: string | null;
@@ -71,6 +77,7 @@ export function buildUsageReport(config: TeamAIConfig, state: PersistedState, op
     group.accounts.push({
       id: account.id, label: maskLabel(account.label, level, index), enabled: account.enabled, priority: account.priority,
       plan: saved?.profile?.rateLimitTier ?? null, usage, windows, measuredAt: iso(saved?.measuredAt),
+      resetTickets: account.provider === 'claude' && saved?.resetCredits ? { general: saved.resetCredits.general, fable: saved.resetCredits.fable, nextExpiry: iso(saved.resetCredits.nextExpiry), readAt: iso(saved.resetCredits.readAt), stale: resetTicketsStale(saved.resetCredits, now) } : null,
       cooldownUntil: coolingDown ? iso(cooldownUntil) : null, cooldownReason: coolingDown ? status?.cooldownReason ?? null : null,
       error: error === null ? null : mask(error), inflight: status ? status.inflight : null, available,
     });
@@ -92,7 +99,8 @@ export function formatUsageTable(report: UsageReport): string {
     for (const account of group.accounts) {
       const windows = Object.entries(account.windows).map(([name, w]) => `${name} ${percent(w.usage)}${w.resetsInMs != null ? ` (${AccountPool.formatDuration(w.resetsInMs)})` : ''}`).join('  ');
       const flags = [!account.enabled ? 'off' : '', account.cooldownUntil ? `cooldown${account.cooldownReason ? `:${account.cooldownReason}` : ''}` : '', account.error ? 'error' : '', account.inflight ? `${account.inflight} in flight` : ''].filter(Boolean).join(', ');
-      lines.push(`  ${account.available ? '●' : '○'} ${account.label}  ${windows || 'unmeasured'}${flags ? `  [${flags}]` : ''}`);
+      const tickets = resetTickets(account.resetTickets);
+      lines.push(`  ${account.available ? '●' : '○'} ${account.label}  ${windows || 'unmeasured'}${tickets ? `  resets ${tickets}${account.resetTickets?.stale ? ' (stale)' : ''}` : ''}${flags ? `  [${flags}]` : ''}`);
     }
   }
   return lines.join('\n');

@@ -148,6 +148,8 @@ Fable 등급 429(`7d_oi`는 거절됐지만 공유 `7d` 창은 아직 허용된 
 
 **Fable 전용 계정.** 기본값은 모든 계정에서 꺼져 있습니다. `teamai fable-only claude <계정> on`으로 Claude 계정 하나를 Fable 전용으로 만듭니다. 그 계정의 모델별 주간(Fable) 창에 예산이 남아 있는 동안에는 모든 Fable 요청이 다른 어느 계정보다(고정 우선순위보다도) 먼저 그 계정으로 가고, 다른 모델(Opus, Sonnet, Haiku) 요청은 보내지 않습니다(릴레이 자체의 백그라운드 할당량 측정만 예외). Fable 한도는 주간 한도의 최대 절반이라, 그 창을 다 쓰면 계정의 남은 주간 여유가 놀게 됩니다. 그래서 그때부터는 Fable이 다른 계정으로 넘어가고, Fable 전용 계정은 다른 모델을 일반 계정처럼 처리합니다. 예약 중인 동안 대시보드 상태는 `fable`로 표시됩니다. 실행 중인 릴레이는 대시보드의 `R`이나 `teamai restart`로 변경을 반영합니다.
 
+**한도 리셋 티켓.** Claude가 계정에 한도 리셋 티켓을 줄 때가 있습니다. `resets` 열과 `teamai accounts`가 계정마다 가진 수를 보여줍니다: `R<n>`은 주간 한도 전체, `F<n>`은 Fable 창만 리셋합니다. 릴레이가 이미 보내는 사용량 요청(`?cedar_ember=1`)에서 읽으며, TeamAI는 표시만 하고 티켓을 쓰지 않습니다 — 사용은 Claude에서 직접 하세요. 이 열은 티켓을 가진 계정이 있고 행이 터미널 폭 안에 들어갈 때만 나타납니다. 하루 넘게 다시 읽지 못한 수는 이미 썼을 수 있어 흐리게 표시합니다(`teamai accounts`에서는 `, stale`). 어떤 계정에서 티켓 요청만 거부되고 일반 요청은 되면, 그 계정은 일반 방식으로 할당량만 읽고 6시간 동안 티켓을 다시 묻지 않습니다.
+
 전체 화면 TUI는 Claude와 Codex 계정을 그룹으로 묶고, 사용량이 바뀌어도 현재 선택된 계정을 고정해 둡니다. Claude 행은 `7d overall`과 모델 범위의 `7d Fable` 창을 각각 보여주고(Claude가 2026년 11월 5시간 세션 한도를 주간 한도로 통합했기 때문에, `5h session` 열은 살아 있는 5시간 창을 보고하는 계정이 있을 때만 나타납니다), Codex 행은 주/부 창을 해당 계정이 실제로 보고한 기간을 제목으로 달아(`1w limit`) 보여줍니다. 할당량은 공식 클라이언트 응답에서 학습하며 재시작해도 유지됩니다.
 
 푸터는 TeamClaude와 동일한 계정 워크플로를 제공합니다 — Claude/Codex 실행, 선택, 전환, 활성/비활성, 순서, 삭제, 추가/로그인, 재측정(`R`), 종료. `switch`는 선택한 계정을 해당 제공자 풀의 맨 앞에 고정합니다. 순서 모드에서는 순위를 지정하거나 계정을 자동 스케줄링으로 되돌릴 수 있습니다. Claude 프로필을 갱신하면 요금제 등급(`Ultra`(구 Max 20x), `Max 5x`, `Pro` — TeamAI가 모르는 등급은 `OAuth`가 아니라 보고된 이름 그대로)과 `past_due` 같은 비정상 구독 상태가 빨간색으로 표시됩니다.
@@ -204,7 +206,7 @@ JSON(일부 생략):
         "plan": "default_claude_max_20x", "usage": 0.05,
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
-        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
         "error": null, "inflight": 0, "available": true
       }]
     },
@@ -213,7 +215,7 @@ JSON(일부 생략):
 }
 ```
 
-`usage`는 0~1 사이의 비율입니다. 창 이름은 업스트림이 보고하는 그대로입니다. Claude는 `7d`(전체 주간), `7d_oi`(최상위 모델 주간), 남아 있는 동안의 `5h`이고, Codex는 `primary`·`secondary`입니다. `available`은 켜져 있고, 오류가 없고, 쿨다운 중이 아니고, `switchThreshold` 미만이라는 뜻입니다. `state.json`에서 만든 보고서면 `inflight`는 `null`입니다. 계정 주소는 캡처와 같은 방식으로 가려지고(`--redact`), 토큰·자격증명은 보고서에 절대 들어가지 않습니다.
+`usage`는 0~1 사이의 비율입니다. 창 이름은 업스트림이 보고하는 그대로입니다. Claude는 `7d`(전체 주간), `7d_oi`(최상위 모델 주간), 남아 있는 동안의 `5h`이고, Codex는 `primary`·`secondary`입니다. `available`은 켜져 있고, 오류가 없고, 쿨다운 중이 아니고, `switchThreshold` 미만이라는 뜻입니다. `state.json`에서 만든 보고서면 `inflight`는 `null`입니다. `resetTickets`는 Codex 계정과 티켓을 한 번도 읽지 못한 Claude 계정에서는 `null`이고, 그 외에는 `{ general, fable, nextExpiry, readAt, stale }`입니다. `stale`은 그 수가 하루 넘게 지난 값이라는 뜻입니다. 계정 주소는 캡처와 같은 방식으로 가려지고(`--redact`), 토큰·자격증명은 보고서에 절대 들어가지 않습니다.
 
 ### HTTP 엔드포인트
 

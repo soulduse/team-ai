@@ -91,3 +91,17 @@ test('a request target that does not parse yields null instead of throwing', () 
   assert.equal(requestUrl({ url: '//' } as never), null);
   assert.equal(requestUrl({ url: '/usage?redact=full' } as never)?.searchParams.get('redact'), 'full');
 });
+
+test('usage report carries Claude reset tickets with their age, and the table names them', () => {
+  const { config, state } = fixture();
+  state.accounts['cred-a']!.resetCredits = { general: 1, fable: 3, nextExpiry: NOW + 86_400_000, readAt: NOW - 60_000 };
+  state.accounts['cred-b']!.resetCredits = { general: 0, fable: 2, nextExpiry: null, readAt: NOW - 3 * 86_400_000 };
+  const report = buildUsageReport(config, state, { source: 'state', now: NOW });
+  const [a, b] = report.providers.claude.accounts;
+  assert.deepEqual(a?.resetTickets, { general: 1, fable: 3, nextExpiry: new Date(NOW + 86_400_000).toISOString(), readAt: new Date(NOW - 60_000).toISOString(), stale: false });
+  assert.equal(b?.resetTickets?.stale, true);
+  assert.equal(report.providers.codex.accounts[0]?.resetTickets, null);
+  const table = formatUsageTable(report);
+  assert.match(table, /resets R1 F3(?! \(stale\))/);
+  assert.match(table, /resets F2 \(stale\)/);
+});

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { claudeProvider, claudeUsageQuota, codexProvider, codexUsageQuota } from '../src/providers.js';
-import type { RuntimeAccount } from '../src/types.js';
+import { claudeProvider, claudeResetCredits, claudeUsageQuota, codexProvider, codexUsageQuota } from '../src/providers.js';
+import { resetTickets } from '../src/frame.js';
+import type { ResetCredits, RuntimeAccount } from '../src/types.js';
 
 const account = { id: 'acct', provider: 'codex', label: 'a', enabled: true, priority: null, credentialId: 'c', createdAt: '', credential: { accessToken: 'secret', refreshToken: null, expiresAt: null, accountId: 'account-1' }, usage: null, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, inflight: 0 } as RuntimeAccount;
 
@@ -242,4 +243,96 @@ test('claude readQuota ignores a window whose headers carry no figure', () => {
   assert.equal(quota?.windows['5h'], undefined);
   assert.equal(quota?.windows['7d']?.usage, 0.4);
   assert.equal(quota?.routingUsage, 0.4);
+});
+
+// counts only: readAt is the read time, checked on its own
+const counts = (c: ResetCredits | null | undefined) => c && { general: c.general, fable: c.fable, nextExpiry: c.nextExpiry };
+
+test('Claude reset tickets: whole-week vs Fable-only by `clears`, paused and used-up grants skipped', () => {
+  const grant = (clears: string[], extra: Record<string, unknown> = {}) => ({ id: 'g', label: 'x', clears, resets_left: 1, usable_now: true, paused: false, ends_at: '2027-03-09T07:59:00+00:00', ...extra });
+  const data = {
+    limits: [{ kind: 'weekly_all', percent: 10, resets_at: '2026-11-21T05:00:00+00:00' }],
+    cedar_ember: {
+      eligible: true,
+      grants: [
+        grant(['seven_day', 'seven_day_overage_included'], { ends_at: '2026-12-10T22:00:00+00:00' }),
+        grant(['seven_day_overage_included']),
+        grant(['seven_day_overage_included']),
+        grant(['seven_day_overage_included'], { resets_left: 2 }),
+        grant(['seven_day_overage_included'], { paused: true }),
+        grant(['seven_day'], { resets_left: 0 }),
+        null,
+      ],
+    },
+  };
+  assert.deepEqual(counts(claudeResetCredits(data)), { general: 1, fable: 4, nextExpiry: Date.parse('2026-12-10T22:00:00+00:00') });
+  assert.deepEqual(counts(claudeUsageQuota(data)?.resetCredits), { general: 1, fable: 4, nextExpiry: Date.parse('2026-12-10T22:00:00+00:00') });
+  // no cedar_ember in the response → the snapshot leaves the last reading alone
+  assert.equal('resetCredits' in (claudeUsageQuota({ limits: data.limits }) ?? {}), false);
+  assert.deepEqual(counts(claudeResetCredits({ cedar_ember: { eligible: true, grants: [] } })), { general: 0, fable: 0, nextExpiry: null });
+  assert.equal(resetTickets({ general: 1, fable: 3 }), 'R1 F3');
+  assert.equal(resetTickets({ general: 0, fable: 2 }), 'F2');
+  assert.equal(resetTickets({ general: 0, fable: 0 }), '');
+});
+
+test('Claude reset tickets: expired, unknown windows and lost eligibility are not counted', () => {
+  const g = (clears: string[], ends_at: string) => ({ id: 'g', clears, resets_left: 1, paused: false, ends_at });
+  const past = '2020-01-01T00:00:00+00:00'; const future = '2099-01-01T00:00:00+00:00';
+  assert.deepEqual(counts(claudeResetCredits({ cedar_ember: { eligible: true, grants: [g(['seven_day'], past), g(['five_hour'], future), g([], future), g(['seven_day_overage_included'], future)] } })), { general: 0, fable: 1, nextExpiry: Date.parse(future) });
+  assert.deepEqual(counts(claudeResetCredits({ cedar_ember: { eligible: false, grants: [g(['seven_day'], future)] } })), { general: 0, fable: 0, nextExpiry: null });
+  assert.deepEqual(counts(claudeResetCredits({ cedar_ember: { eligible: true } })), { general: 0, fable: 0, nextExpiry: null });
+  assert.equal(claudeResetCredits({}), null);
+  const read = claudeResetCredits({ cedar_ember: { eligible: true, grants: [] } });
+  assert.ok(read?.readAt && Math.abs(read.readAt - Date.now()) < 5_000);
+});
+
+test('Claude fetchUsage asks for tickets with the live UA, never retries 401/429/5xx, and stops asking once the form is refused', async () => {
+  const realFetch = globalThis.fetch;
+  const calls: Array<{ url: string; ua: string | null; app: string | null }> = [];
+  let statuses: number[] = [];
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    calls.push({ url: String(input), ua: headers.get('user-agent'), app: headers.get('x-app') });
+    const status = statuses.shift() ?? 200;
+    const body = status === 200 ? { limits: [{ kind: 'weekly_all', percent: 40, resets_at: '2099-01-01T00:00:00Z' }], cedar_ember: { eligible: true, grants: [{ id: 'g', clears: ['seven_day_overage_included'], resets_left: 1, ends_at: '2099-01-01T00:00:00Z' }] } } : {};
+    return new Response(JSON.stringify(body), { status });
+  }) as typeof fetch;
+  const credFor = (accountId: string) => ({ accessToken: 't', refreshToken: null, expiresAt: Date.now() + 60_000, accountId }) as never;
+  const cred = credFor('acct-main');
+  const tickets = 'https://api.anthropic.com/api/oauth/usage?cedar_ember=1'; const plain = 'https://api.anthropic.com/api/oauth/usage';
+  try {
+    // no live client seen yet: the known-good CLI user-agent
+    const ok = await claudeProvider.fetchUsage!(cred);
+    assert.deepEqual(calls.map((c) => c.url), [tickets]);
+    assert.match(calls[0]?.ua ?? '', /^claude-cli\//); assert.equal(calls[0]?.app, 'cli');
+    assert.deepEqual(counts(ok?.resetCredits), { general: 0, fable: 1, nextExpiry: Date.parse('2099-01-01T00:00:00Z') });
+    // the live client's user-agent wins; a non-CLI one does not
+    calls.length = 0; await claudeProvider.fetchUsage!(cred, 'claude-cli/9.9.9 (external, cli)');
+    assert.equal(calls[0]?.ua, 'claude-cli/9.9.9 (external, cli)');
+    calls.length = 0; await claudeProvider.fetchUsage!(cred, 'curl/8');
+    assert.match(calls[0]?.ua ?? '', /^claude-cli\/2\./);
+    for (const status of [401, 429, 503]) {
+      calls.length = 0; statuses = [status];
+      await assert.rejects(claudeProvider.fetchUsage!(cred), new RegExp(`\\(${status}\\)`));
+      assert.deepEqual(calls.map((c) => c.url), [tickets]);
+    }
+    // refused form: the plain read answers, and later polls skip the ticket form
+    calls.length = 0; statuses = [400, 200];
+    const fallback = await claudeProvider.fetchUsage!(cred);
+    assert.deepEqual(calls.map((c) => c.url), [tickets, plain]);
+    assert.equal(fallback?.windows['7d']?.usage, 0.4);
+    calls.length = 0; await claudeProvider.fetchUsage!(cred);
+    assert.deepEqual(calls.map((c) => c.url), [plain]);
+    // that refusal was this account's: another account still asks for tickets
+    calls.length = 0; await claudeProvider.fetchUsage!(credFor('acct-other'));
+    assert.deepEqual(calls.map((c) => c.url), [tickets]);
+    // the plain read failing too means a bad token, not a refused form: no back-off
+    const broken = credFor('acct-broken');
+    calls.length = 0; statuses = [403, 403];
+    await assert.rejects(claudeProvider.fetchUsage!(broken), /\(403, then 403\)/);
+    calls.length = 0; await claudeProvider.fetchUsage!(broken);
+    assert.deepEqual(calls.map((c) => c.url), [tickets]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

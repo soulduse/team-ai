@@ -599,3 +599,38 @@ test('fable-only: saturation, the 99% floor, a Codex account ignores the flag', 
   const codex = new AccountPool(provider, [{ ...account('c'), fableOnly: true }], { 'codex:c': credential('c') }, state);
   assert.equal(codex.acquire('x', new Set(), false)?.id, 'c');
 });
+
+test('reset tickets survive a restart: exportState → constructor', () => {
+  const win = { usage: 0.2, resetsAt: null, windows: { '7d': { usage: 0.2, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null };
+  const before = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, { version: 1, accounts: { 'codex:a': { ...win, resetCredits: { general: 1, fable: 3, nextExpiry: 5 } } } });
+  const saved: PersistedState = { version: 1, accounts: {} }; before.exportState(saved);
+  assert.deepEqual(saved.accounts['codex:a']?.resetCredits, { general: 1, fable: 3, nextExpiry: 5 });
+  const after = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, saved);
+  assert.deepEqual(after.accounts[0]?.resetCredits, { general: 1, fable: 3, nextExpiry: 5 });
+  // a reading without tickets keeps the last count
+  const p = new AccountPool({ ...provider, readQuota: () => ({ routingUsage: 0.3, routingResetsAt: null, windows: {} }) }, [account('a')], { 'codex:a': credential('a') }, saved);
+  p.updateQuota(p.accounts[0]!, new Headers());
+  assert.deepEqual(p.accounts[0]?.resetCredits, { general: 1, fable: 3, nextExpiry: 5 });
+});
+
+test('refreshUsage hands the live client user-agent to the usage read', async () => {
+  const agents: Array<string | null | undefined> = [];
+  const usageProvider: Provider = { ...provider, fetchUsage: async (_c, ua) => { agents.push(ua); return { routingUsage: 0.1, routingResetsAt: null, windows: {} }; } };
+  const probes = { codex: { path: '/x', model: 'm', version: '', beta: null, system: null, userAgent: 'claude-cli/9.9.9 (external, cli)', query: '', elicitsModelWeekly: false } };
+  const pool = new AccountPool(usageProvider, [account('a')], { 'codex:a': credential('a') }, { version: 1, accounts: {}, probes });
+  await pool.refreshUsage(0);
+  assert.deepEqual(agents, ['claude-cli/9.9.9 (external, cli)']);
+  const bare = new AccountPool(usageProvider, [account('b')], { 'codex:b': credential('b') }, state);
+  agents.length = 0; await bare.refreshUsage(0);
+  assert.deepEqual(agents, [null]);
+});
+
+test('a usage read that lost the race to proxied headers still keeps the tickets it carried', async () => {
+  const tickets = { general: 1, fable: 2, nextExpiry: null, readAt: Date.now() };
+  const usageProvider: Provider = { ...provider, fetchUsage: async () => { pool.accounts[0]!.measuredAt = Date.now() + 1_000; return { routingUsage: 0.9, routingResetsAt: null, windows: {}, resetCredits: tickets }; } };
+  const pool = new AccountPool(usageProvider, [account('a')], { 'codex:a': credential('a') }, state);
+  pool.accounts[0]!.usage = 0.1;
+  await pool.refreshUsage(0);
+  assert.equal(pool.accounts[0]!.usage, 0.1); // the newer header reading stands
+  assert.deepEqual(pool.accounts[0]!.resetCredits, tickets);
+});

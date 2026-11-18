@@ -1,4 +1,4 @@
-import type { OAuthCredential, Provider, QuotaSnapshot, QuotaWindow } from './types.js';
+import type { OAuthCredential, Provider, QuotaSnapshot, QuotaWindow, ResetCredits } from './types.js';
 
 // accept-encoding is dropped too: fetch negotiates and decompresses on its own,
 // and echoing the client's preference upstream only invites a compressed body we
@@ -93,7 +93,41 @@ function timestamp(raw: string | null): number | null {
 // five_hour/seven_day fields back it up for a response without `limits`.
 interface ClaudeUsageLimit { kind?: string; percent?: number; resets_at?: string | null; scope?: { model?: { display_name?: string | null } | null } | null }
 interface ClaudeUsageWindow { utilization?: number | null; resets_at?: string | null }
-export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; five_hour?: ClaudeUsageWindow | null; seven_day?: ClaudeUsageWindow | null }): QuotaSnapshot | null {
+const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+// Used for the ticket read until the relay has seen a live Claude Code request.
+const TICKETS_USER_AGENT = 'claude-cli/2.1.322 (external, cli)';
+// After upstream refuses the ticket form for an account, plain reads only for this long.
+// Per account: one account's refusal (an ineligible seat, say) says nothing about the rest.
+const TICKETS_RETRY_MS = 6 * 3_600_000;
+const ticketsRefusedUntil = new Map<string, number>();
+
+// `cedar_ember` (asked for with ?cedar_ember=1) lists the limit-reset tickets. A
+// ticket whose `clears` names `seven_day` resets the whole weekly limit; one
+// that does not clears only the model-scoped (Fable) window. Paused or used-up
+// grants are not counted.
+export function claudeResetCredits(data: unknown): ResetCredits | null {
+  const ember = (data as { cedar_ember?: { eligible?: unknown; grants?: unknown } } | null)?.cedar_ember;
+  if (!ember || typeof ember !== 'object') return null;
+  const now = Date.now();
+  const credits: ResetCredits = { general: 0, fable: 0, nextExpiry: null, readAt: now };
+  // an account that lost eligibility (or has no grants) shows none, not a stale count
+  if (ember.eligible === false || !Array.isArray(ember.grants)) return credits;
+  for (const raw of ember.grants as Array<Record<string, unknown> | null>) {
+    if (!raw || raw.paused === true) continue;
+    const left = typeof raw.resets_left === 'number' && Number.isInteger(raw.resets_left) ? raw.resets_left : 1;
+    if (left <= 0) continue;
+    const ends = timestamp(typeof raw.ends_at === 'string' ? raw.ends_at : null);
+    if (ends !== null && ends <= now) continue;
+    const clears = Array.isArray(raw.clears) ? raw.clears : [];
+    if (clears.includes('seven_day')) credits.general += left;
+    else if (clears.includes('seven_day_overage_included')) credits.fable += left;
+    else continue; // a ticket for a window TeamAI does not show
+    if (ends !== null && (credits.nextExpiry === null || ends < credits.nextExpiry)) credits.nextExpiry = ends;
+  }
+  return credits;
+}
+
+export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; five_hour?: ClaudeUsageWindow | null; seven_day?: ClaudeUsageWindow | null; cedar_ember?: unknown }): QuotaSnapshot | null {
   const windows: Record<string, QuotaWindow> = {};
   const put = (name: string, percent: number | null | undefined, reset: string | null | undefined): void => {
     if (typeof percent === 'number' && Number.isFinite(percent)) windows[name] = { usage: Math.max(0, Math.min(1, percent / 100)), resetsAt: timestamp(reset ?? null) };
@@ -107,7 +141,8 @@ export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; fiv
   if (!windows['7d']) put('7d', data.seven_day?.utilization, data.seven_day?.resets_at);
   if (!Object.keys(windows).length) return null;
   const routing = ['5h', '7d'].map((name) => windows[name]).filter((x) => x?.usage != null).sort((a, b) => (b?.usage ?? 0) - (a?.usage ?? 0))[0];
-  return { routingUsage: routing?.usage ?? null, routingResetsAt: routing?.resetsAt ?? null, windows };
+  const resetCredits = claudeResetCredits(data);
+  return { routingUsage: routing?.usage ?? null, routingResetsAt: routing?.resetsAt ?? null, windows, ...(resetCredits ? { resetCredits } : {}) };
 }
 
 // Codex's /wham/usage: the same primary/secondary windows the x-codex-* headers
@@ -268,8 +303,28 @@ export const claudeProvider: Provider = {
     const data = await response.json() as { account?: { has_claude_max?: boolean; has_claude_pro?: boolean }; organization?: { subscription_status?: string; subscription_created_at?: string; rate_limit_tier?: string; organization_type?: string } };
     return { status: data.organization?.subscription_status ?? null, createdAt: data.organization?.subscription_created_at ?? null, rateLimitTier: data.organization?.rate_limit_tier ?? null, orgType: data.organization?.organization_type ?? null, hasClaudeMax: data.account?.has_claude_max ?? null, hasClaudePro: data.account?.has_claude_pro ?? null, fetchedAt: Date.now() };
   },
-  async fetchUsage(credential) {
-    const response = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15_000) });
+  async fetchUsage(credential, userAgent) {
+    const headers = { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' };
+    // The reset-ticket grants come back only with ?cedar_ember=1 and Claude Code's client
+    // headers: the user-agent the relay learned from the live client, else a known-good one.
+    if (Date.now() >= (ticketsRefusedUntil.get(credential.accountId) ?? 0)) {
+      const agent = userAgent && /^claude-cli\//.test(userAgent) ? userAgent : TICKETS_USER_AGENT;
+      const response = await fetch(`${CLAUDE_USAGE_URL}?cedar_ember=1`, { headers: { ...headers, 'user-agent': agent, 'x-app': 'cli' }, signal: AbortSignal.timeout(15_000) });
+      // The tickets are extra: if that request form is refused (400/403/404), read the quota the
+      // plain way and stop asking for a while, so every poll does not cost two requests. Not on
+      // 401 (dead token), 429 (rate limited) or 5xx (outage): a second call there only adds load.
+      if (![400, 403, 404].includes(response.status)) {
+        if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
+        return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
+      }
+      await response.body?.cancel();
+      const plain = await fetch(CLAUDE_USAGE_URL, { headers, signal: AbortSignal.timeout(15_000) });
+      if (!plain.ok) throw new Error(`Claude usage failed (${response.status}, then ${plain.status})`);
+      // Only now is it the ticket form that was refused: the same token reads the plain form fine.
+      ticketsRefusedUntil.set(credential.accountId, Date.now() + TICKETS_RETRY_MS);
+      return claudeUsageQuota(await plain.json() as Parameters<typeof claudeUsageQuota>[0]);
+    }
+    const response = await fetch(CLAUDE_USAGE_URL, { headers, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
     return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
   },
