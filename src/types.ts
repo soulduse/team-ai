@@ -6,6 +6,10 @@ export interface StoredAccount {
   label: string;
   enabled: boolean;
   priority: number | null;
+  // Fable first: Fable turns go here ahead of every other account, and no other
+  // model is served while it has Fable budget left. Once its Fable window is
+  // spent, Fable spills to the pool and this account serves other models.
+  fableOnly?: boolean;
   credentialId: string;
   createdAt: string;
 }

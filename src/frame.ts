@@ -179,7 +179,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       : Array.from({ length: codexWindowCount }, (_, index) => slot(spanAt(index))).join('');
     lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
     for (const account of group) {
-      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
+      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : codexPlan(profile);
       const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {

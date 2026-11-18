@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
-import type { OAuthCredential, PersistedState, Provider, StoredAccount } from '../src/types.js';
+import type { OAuthCredential, PersistedState, Provider, QuotaSnapshot, StoredAccount } from '../src/types.js';
 
 const provider: Provider = {
   id: 'codex', label: 'Codex', upstreamBase: 'https://example.test', normalizePath: (p) => p,
@@ -11,6 +11,8 @@ const provider: Provider = {
 const credential = (id: string): OAuthCredential => ({ accessToken: `token-${id}`, refreshToken: 'refresh', expiresAt: Date.now() + 60_000, accountId: id });
 const account = (id: string, priority: number | null = null): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority, credentialId: `codex:${id}`, createdAt: new Date().toISOString() });
 const state: PersistedState = { version: 1, accounts: {} };
+// fable-only needs a provider with a Fable tier (the flag is ignored otherwise)
+const fableProvider: Provider = { ...provider, fableModel: 'claude-fable' };
 
 test('selects explicit priority and keeps session affinity', () => {
   const pool = new AccountPool(provider, [account('a', 2), account('b', 1)], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state, 0.98, 3);
@@ -500,4 +502,100 @@ test('sweepExpired drops an inert window with no reset, keeping measured ones', 
   pool.accounts[0]!.windows = { '5h': { usage: 0, resetsAt: null }, '7d': { usage: 0.4, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 0, resetsAt: now + 86_400_000 } };
   pool.sweepExpired();
   assert.deepEqual(Object.keys(pool.accounts[0]!.windows).sort(), ['7d', '7d_oi']);
+});
+
+test('a Fable-only account takes Fable first, never another model, and Fable spills once its budget is gone', () => {
+  const stored = [{ ...account('home'), fableOnly: true }, account('a'), account('b')];
+  const credentials = { 'codex:home': credential('home'), 'codex:a': credential('a'), 'codex:b': credential('b') };
+  const win = (fable: number, weekly: number) => ({ usage: weekly, resetsAt: null, windows: { '7d': { usage: weekly, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const fresh = () => new AccountPool(fableProvider, stored, credentials, { version: 1, accounts: { 'codex:home': win(0.5, 0.05), 'codex:a': win(0, 0.1), 'codex:b': win(0, 0.1) } });
+  // Fable goes home even though the others have far more headroom
+  const pool = fresh();
+  const f = pool.acquire('s', new Set(), true); assert.equal(f?.id, 'home'); pool.release(f!);
+  // the same session's Opus/Haiku turns never land there
+  for (let i = 0; i < 5; i++) { const g = pool.acquire(`g${i}`, new Set(), false); assert.notEqual(g?.id, 'home'); pool.release(g!); }
+  // a session pinned elsewhere for Fable moves home
+  const moved = fresh(); moved.accounts.find((a) => a.id === 'home')!.enabled = false;
+  const away = moved.acquire('p', new Set(), true); assert.notEqual(away?.id, 'home'); moved.release(away!);
+  moved.accounts.find((a) => a.id === 'home')!.enabled = true;
+  assert.equal(moved.acquire('p', new Set(), true)?.id, 'home');
+  // home's Fable spent → Fable spills to the pool; a non-Fable request still never takes it
+  const spent = new AccountPool(fableProvider, stored, credentials, { version: 1, accounts: { 'codex:home': win(1, 0.6), 'codex:a': win(0, 0.1), 'codex:b': win(0, 0.1) } });
+  assert.notEqual(spent.acquire('x', new Set(), true)?.id, 'home');
+  const only = new AccountPool(fableProvider, [stored[0]!], { 'codex:home': credential('home') }, { version: 1, accounts: { 'codex:home': win(0.2, 0.2) } });
+  assert.equal(only.acquire('y', new Set(), false), null);
+  // with its Fable spent the rest of its week is not wasted: other models may use it
+  const after = new AccountPool(fableProvider, [stored[0]!], { 'codex:home': credential('home') }, { version: 1, accounts: { 'codex:home': win(1, 0.5) } });
+  assert.equal(after.acquire('z', new Set(), false)?.id, 'home');
+});
+
+test('fable-only: reload, restart, cap spill, ranking over an explicit #1, unmeasured Fable, and the 429 message', () => {
+  const win = (fable: number | null, weekly: number, resetsAt: number | null = null) => ({ usage: weekly, resetsAt: null, windows: { '7d': { usage: weekly, resetsAt: null }, ...(fable === null ? {} : { '7d_oi': { usage: fable, resetsAt } }) }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const credentials = { 'codex:home': credential('home'), 'codex:a': credential('a') };
+  // config reload (sync) carries the flag on and off
+  const pool = new AccountPool(fableProvider, [account('home'), account('a')], credentials, { version: 1, accounts: { 'codex:home': win(0.1, 0.1), 'codex:a': win(0.1, 0.1) } });
+  pool.sync([{ ...account('home'), fableOnly: true }, account('a')], credentials);
+  for (let i = 0; i < 3; i++) { const g = pool.acquire(`s${i}`, new Set(), false); assert.equal(g?.id, 'a'); pool.release(g!); }
+  pool.sync([account('home'), account('a')], credentials);
+  assert.equal(pool.accounts.find((a) => a.id === 'home')?.fableOnly, undefined);
+  // an explicit #1 ordinary account does not outrank the Fable home for Fable
+  const ranked = new AccountPool(fableProvider, [{ ...account('home'), fableOnly: true }, account('a', 1)], credentials, { version: 1, accounts: { 'codex:home': win(0.3, 0.3), 'codex:a': win(0, 0) } });
+  assert.equal(ranked.acquire('f', new Set(), true)?.id, 'home');
+  // home at its concurrency cap → Fable spills, the non-Fable shortfall says why
+  const capped = new AccountPool(fableProvider, [{ ...account('home'), fableOnly: true }, account('a')], credentials, { version: 1, accounts: { 'codex:home': win(0.3, 0.3), 'codex:a': win(0, 0) } }, 0.98, 1);
+  const first = capped.acquire('c1', new Set(), true); assert.equal(first?.id, 'home');
+  assert.equal(capped.acquire('c2', new Set(), true)?.id, 'a');
+  // unmeasured Fable window still counts as Fable budget left: no other model goes there
+  const unmeasured = new AccountPool(fableProvider, [{ ...account('home'), fableOnly: true }], { 'codex:home': credential('home') }, { version: 1, accounts: { 'codex:home': win(null, 0.1) } });
+  assert.equal(unmeasured.acquire('u', new Set(), false), null);
+  const why = unmeasured.explainShortfall(new Set(), false);
+  assert.equal(why.reason, 'quota_exhausted');
+  assert.match(why.message, /1 kept for Fable only/);
+});
+
+test('a Fable window marked spent by a 429 stays spent when a poll of the same window reads 99%', () => {
+  const resetsAt = Date.now() + 86_400_000;
+  const quota = (fable: number, at = resetsAt) => ({ routingUsage: 0.5, routingResetsAt: null, windows: { '7d': { usage: 0.5, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: at } } });
+  let next = quota(0.99);
+  const p: Provider = { ...fableProvider, readQuota: () => next };
+  const pool = new AccountPool(p, [{ ...account('home'), fableOnly: true }, account('a')], { 'codex:home': credential('home'), 'codex:a': credential('a') }, state);
+  const home = pool.accounts.find((a) => a.id === 'home')!;
+  home.windows = { '7d_oi': { usage: 0.5, resetsAt } };
+  pool.markFableSpent(home, 0);
+  pool.updateQuota(home, new Headers());
+  assert.equal(home.windows['7d_oi']?.usage, 1);
+  // a new window (a Fable reset ticket, or the weekly rollover) is taken as read
+  next = quota(0.99, resetsAt + 7 * 86_400_000);
+  pool.updateQuota(home, new Headers());
+  assert.equal(home.windows['7d_oi']?.usage, 0.99);
+  // the floor is part of the opt-in: an ordinary account takes the same poll as read
+  const plain = pool.accounts.find((a) => a.id === 'a')!;
+  next = quota(0.99);
+  plain.windows = { '7d_oi': { usage: 0.5, resetsAt } };
+  pool.markFableSpent(plain, 0);
+  pool.updateQuota(plain, new Headers());
+  assert.equal(plain.windows['7d_oi']?.usage, 0.99);
+});
+
+test('fable-only: saturation, the 99% floor, a Codex account ignores the flag', () => {
+  const win = (fable: number, weekly: number) => ({ usage: weekly, resetsAt: null, windows: { '7d': { usage: weekly, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const credentials = { 'codex:home': credential('home'), 'codex:a': credential('a') };
+  // the ordinary account is spent and the fable-only one is at its cap: a non-Fable
+  // request is out of budget, not "retry in 5 s" forever
+  const pool = new AccountPool(fableProvider, [{ ...account('home'), fableOnly: true }, account('a')], credentials, { version: 1, accounts: { 'codex:home': win(0.2, 0.2), 'codex:a': win(0, 1) } }, 0.98, 1);
+  const f = pool.acquire('f', new Set(), true); assert.equal(f?.id, 'home');
+  assert.equal(pool.acquire('g', new Set(), false), null);
+  assert.equal(pool.explainShortfall(new Set(), false).reason, 'quota_exhausted');
+  // a poll that reads well below the spent mark (a new reading, not rounding) is taken as read
+  let next: QuotaSnapshot = { routingUsage: 0.2, routingResetsAt: null, windows: { '7d_oi': { usage: 0.5, resetsAt: null } } };
+  const p = new AccountPool({ ...fableProvider, readQuota: () => next }, [{ ...account('home'), fableOnly: true }], { 'codex:home': credential('home') }, state);
+  const home = p.accounts[0]!; p.markFableSpent(home, 0);
+  p.updateQuota(home, new Headers()); assert.equal(home.windows['7d_oi']?.usage, 0.5);
+  // over 100% from a header still counts as spent for the floor
+  home.windows = { '7d_oi': { usage: 1.02, resetsAt: null } };
+  next = { routingUsage: 0.2, routingResetsAt: null, windows: { '7d_oi': { usage: 0.99, resetsAt: Date.now() + 1000 } } };
+  p.updateQuota(home, new Headers()); assert.equal(home.windows['7d_oi']?.usage, 1);
+  // the flag on a provider without a Fable tier is ignored rather than idling the account
+  const codex = new AccountPool(provider, [{ ...account('c'), fableOnly: true }], { 'codex:c': credential('c') }, state);
+  assert.equal(codex.acquire('x', new Set(), false)?.id, 'c');
 });

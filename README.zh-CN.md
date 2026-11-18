@@ -135,6 +135,7 @@ teamai tui                                     # 仅仪表盘，不自动启动
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 或者：auto
+teamai fable-only claude user@example.com on  # 或者：off
 teamai capture [--redact partial|full|none] [--out DIR]   # 把仪表盘保存为 .txt 和 .png（无需 TTY）
 teamai usage [--json] [--redact partial|full|none]       # 按账号和窗口查看用量（表格或 JSON）
 ```
@@ -144,6 +145,8 @@ teamai usage [--json] [--redact partial|full|none]       # 按账号和窗口查
 **模型感知路由。** 只有顶级模型（Claude 的 Fable 档）才会动用按模型计的周窗口，因此并不需要它的请求——Opus、Sonnet、Haiku——会被从仍有 Fable 余量的账号上引开，转而分给那些 Fable 窗口已经用尽（达到或超过 `fableReserveThreshold`）的账号，并在这一组内按总的周窗口排序。这样就把每个账号稀缺的 Fable 余量留给真正需要它的请求，同时把原本闲置的周窗口余量利用起来。当没有已用尽的账号空闲时，请求会回退到一个被保留的账号，而不是直接失败。Fable 请求仍沿用普通的"消耗最少优先"顺序；把 `fableReserveThreshold` 设为 `1` 即可关闭这种拆分。
 
 Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只会把该账号的 Fable 窗口搁置，而不是整个账号：其余各模型仍会继续由它服务，而不至于让整个账号为了一份只有顶级模型才消耗的余量而空闲长达一周。若某个 429 拒绝的是共享窗口，则照常搁置整个账号。
+
+**Fable 专用账号。** 默认对所有账号关闭。`teamai fable-only claude <账号> on` 把一个 Claude 账号设为 Fable 专用。只要该账号的按模型周（Fable）窗口还有额度，所有 Fable 请求都会先发往它——优先于其他任何账号，包括固定优先级——且不会把其他模型（Opus、Sonnet、Haiku）的请求路由给它（只有中继自身的后台额度探测例外）。Fable 额度最多为周上限的一半，窗口用完后该账号剩余的周额度就会闲置，所以此后 Fable 会转到其他账号，而 Fable 专用账号像普通账号一样处理其他模型。保留期间仪表盘状态显示为 `fable`。正在运行的中继会在仪表盘按 `R` 或执行 `teamai restart` 后生效。
 
 全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `7d overall` 以及按模型划分的 `7d Fable` 窗口（Claude 已于 2026 年 11 月把 5 小时会话限额并入每周限额，因此只有当某个账号仍上报有效的 5 小时窗口时才会出现 `5h session` 列）；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
 
