@@ -6,6 +6,10 @@ export interface StoredAccount {
   label: string;
   enabled: boolean;
   priority: number | null;
+  // Fable first: Fable turns go here ahead of every other account, and no other
+  // model is served while it has Fable budget left. Once its Fable window is
+  // spent, Fable spills to the pool and this account serves other models.
+  fableOnly?: boolean;
   credentialId: string;
   createdAt: string;
 }
@@ -74,6 +78,9 @@ export interface ResetCredits {
   general: number; // clears the whole weekly limit
   fable: number; // clears the model-scoped (Fable) weekly window only
   nextExpiry: number | null; // soonest expiry among the counted tickets
+  // When the counts were read. A response that stops carrying tickets keeps the
+  // last counts, so a reader judges their age by this (missing = unknown age).
+  readAt?: number;
 }
 
 export interface SubscriptionProfile {
@@ -129,6 +136,15 @@ export interface RuntimeAccount extends StoredAccount {
   inflight: number;
 }
 
+// What only the running server knows: requests in flight and why an account
+// is benched. state.json carries neither.
+export interface LiveAccountStatus {
+  credentialId: string;
+  inflight: number;
+  cooldownUntil: number | null;
+  cooldownReason: RuntimeAccount['cooldownReason'];
+}
+
 export interface FailureDecision {
   // 'quota' benches the whole account; 'model-quota' means only the
   // model-weekly (Fable) budget is spent, so the account still serves every
@@ -162,7 +178,8 @@ export interface Provider {
   // The subscription's own usage read-out — what the client's /usage (Claude)
   // or /status (Codex) screen shows. Unlike a probe it is not a model call, so
   // it spends no quota and can run on a timer across the whole fleet.
-  fetchUsage?(credential: OAuthCredential): Promise<QuotaSnapshot | null>;
+  // userAgent: the live client's, when the relay has seen one (Claude asks for it).
+  fetchUsage?(credential: OAuthCredential, userAgent?: string | null): Promise<QuotaSnapshot | null>;
 }
 
 // Why the pool could not hand out an account, shaped for the 429 the client

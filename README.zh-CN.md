@@ -135,7 +135,9 @@ teamai tui                                     # 仅仪表盘，不自动启动
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 或者：auto
+teamai fable-only claude user@example.com on  # 或者：off
 teamai capture [--redact partial|full|none] [--out DIR]   # 把仪表盘保存为 .txt 和 .png（无需 TTY）
+teamai usage [--json] [--redact partial|full|none]       # 按账号和窗口查看用量（表格或 JSON）
 ```
 
 账号按剩余配额多少排序，消耗最少的排在最前，仪表盘和账号池自身的选取逻辑用的是同一套顺序——所以最上面那一行就是下一个请求将要使用的账号。Claude 的判定依据是按模型计的周窗口（Fable），而不是总的那个，因为实际上最先拒绝顶级模型的正是这个窗口。一旦所有账号都耗尽，它们就全部并列，排序便退化为谁先恢复谁在前——在今天没有任何账号能处理请求的情况下，距离重置的时间是区分它们的唯一依据（Claude 看 Fable 窗口，Codex 看它的周窗口）。未经测量的账号排在最后（未知不等同于用尽），手动固定的优先级依然优先生效，按 `c` 可切换回配置的顺序。
@@ -144,7 +146,9 @@ teamai capture [--redact partial|full|none] [--out DIR]   # 把仪表盘保存�
 
 Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只会把该账号的 Fable 窗口搁置，而不是整个账号：其余各模型仍会继续由它服务，而不至于让整个账号为了一份只有顶级模型才消耗的余量而空闲长达一周。若某个 429 拒绝的是共享窗口，则照常搁置整个账号。
 
-**限额重置券。** Claude 可能会给账号发放限额重置券。`resets` 列和 `teamai accounts` 显示每个账号持有的数量：`R<n>` 重置整个周限额，`F<n>` 只重置 Fable 窗口。数据来自中继已经发送的用量请求（`?cedar_ember=1`）；TeamAI 只显示、从不使用重置券——请在 Claude 中自行使用。
+**Fable 专用账号。** 默认对所有账号关闭。`teamai fable-only claude <账号> on` 把一个 Claude 账号设为 Fable 专用。只要该账号的按模型周（Fable）窗口还有额度，所有 Fable 请求都会先发往它——优先于其他任何账号，包括固定优先级——且不会把其他模型（Opus、Sonnet、Haiku）的请求路由给它（只有中继自身的后台额度探测例外）。Fable 额度最多为周上限的一半，窗口用完后该账号剩余的周额度就会闲置，所以此后 Fable 会转到其他账号，而 Fable 专用账号像普通账号一样处理其他模型。保留期间仪表盘状态显示为 `fable`。正在运行的中继会在仪表盘按 `R` 或执行 `teamai restart` 后生效。
+
+**限额重置券。** Claude 可能会给账号发放限额重置券。`resets` 列和 `teamai accounts` 显示每个账号持有的数量：`R<n>` 重置整个周限额，`F<n>` 只重置 Fable 窗口。数据来自中继已经发送的用量请求（`?cedar_ember=1`）；TeamAI 只显示、从不使用重置券——请在 Claude 中自行使用。只有当某个账号持有重置券且该行仍能放进终端宽度时才显示此列。超过一天未重新读取的数量可能已被使用，因此会变暗显示（`teamai accounts` 中标为 `, stale`）。如果某个账号的重置券请求被拒绝而普通读取正常，中继会对该账号按普通方式只读取额度，并在六小时内不再为它请求重置券。
 
 全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `7d overall` 以及按模型划分的 `7d Fable` 窗口（Claude 已于 2026 年 11 月把 5 小时会话限额并入每周限额，因此只有当某个账号仍上报有效的 5 小时窗口时才会出现 `5h session` 列）；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
 
@@ -164,6 +168,103 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只�
 
 `~D-N` 这个订阅数值是一个估算，并非权威的到期日期：Anthropic 的资料接口会暴露订阅状态和创建时间，但不提供当前计费周期的结束时间。因此 TeamAI 只能推算下一个月度计费周年日，并用 `~` 标注。资料状态会在服务端启动时刷新，此后每六小时刷新一次。
 
+## 在其他会话和脚本中查看用量
+
+仪表盘是给人看的，`teamai usage` 则把同样的数据提供给其他一切：另一个 Claude Code 或 Codex 会话、Shell 脚本、状态栏，或者正在判断要不要开始长任务的智能体。
+
+```bash
+teamai usage                    # 表格：每个账号的所有窗口及距重置的时间
+teamai usage --json             # 同样的内容，JSON 格式
+teamai usage --json --redact full   # 账号显示为“account #N”
+```
+
+```text
+TeamAI usage (live from the server, 2026-11-17T02:17:41.007Z)
+
+claude: 3/9 available, next reset 9h43m
+  ○ account #1  7d 98% (2d15h)  7d_oi 100% (2d15h)
+  ● account #5  7d 5% (6d17h)  7d_oi 8% (6d17h)
+  ● account #6  7d 35% (3d11h)  7d_oi 69% (3d11h)  [2 in flight]
+
+codex: 1/1 available, next reset 1d5h
+  ● account #8  primary 37% (1d5h)  secondary 0%
+```
+
+中继运行时，报告直接来自服务器内存，包括进行中的请求数和账号冷却的原因。服务器未运行（或是没有该端点的旧版本）时，会用 `state.json` 生成同样的报告，`source` 字段注明来源。生成报告不会重新测量，因此不消耗配额，随便调用多少次都可以。
+
+JSON（节选）：
+
+```json
+{
+  "source": "live",
+  "generatedAt": "2026-11-17T02:17:41.007Z",
+  "providers": {
+    "claude": {
+      "summary": { "accounts": 9, "enabled": 9, "available": 3, "nextResetAt": "2026-11-17T12:00:00.475Z" },
+      "accounts": [{
+        "id": "…", "label": "de•••••••••w@gm•••.com", "enabled": true, "priority": null,
+        "plan": "default_claude_max_20x", "usage": 0.05,
+        "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
+                     "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
+        "error": null, "inflight": 0, "available": true
+      }]
+    },
+    "codex": { "summary": { "…": "…" }, "accounts": [] }
+  }
+}
+```
+
+`usage` 是 0 到 1 之间的比例。窗口名称与上游报告的一致：Claude 为 `7d`（总体周额度）、`7d_oi`（顶级模型周额度），以及仍存在时的 `5h`；Codex 为 `primary` 和 `secondary`。`available` 表示已启用、无错误、未在冷却且低于 `switchThreshold`。报告来自 `state.json` 时 `inflight` 为 `null`。`resetTickets` 对 Codex 账号和从未读取到重置券的 Claude 账号为 `null`，否则为 `{ general, fable, nextExpiry, readAt, stale }`，其中 `stale` 表示该数量已超过一天未更新。账号地址的遮蔽方式与截图相同（`--redact`），令牌和凭据永远不会出现在报告中。
+
+### HTTP 端点
+
+控制端口也提供同样的报告。它只监听 `127.0.0.1`，和其他路径一样需要中继的客户端令牌：
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
+```
+
+`3556` 是 `proxy.controlPort` 的默认值；如果改过，请用你设置的值（`jq .proxy.controlPort ~/.config/teamai/config.json`）。在用 `tac` 启动的会话中，`$ANTHROPIC_AUTH_TOKEN` 就是这个令牌。其他地方用 `teamai usage --json` 更简单，它会自己从配置读取令牌。
+
+### 可以这样用
+
+**长任务开始前先检查。** 智能体或脚本在开始大量消耗配额的工作前确认余量：
+
+```bash
+available=$(teamai usage --json | jq '.providers.claude.summary.available')
+[ "$available" -gt 0 ] || { echo "No Claude account free right now"; exit 1; }
+```
+
+**等到重置，而不是直接失败。** 批处理任务可以一直等到最早的窗口重置：
+
+```bash
+until [ "$(teamai usage --json | jq '.providers.claude.summary.available')" -gt 0 ]; do
+  sleep 600
+done
+```
+
+**显示在 Claude Code 状态栏。** 让 `~/.claude/settings.json` 里的 `statusLine` 指向一个小脚本；它直接读取端点，所以很快：
+
+```bash
+#!/bin/sh
+# ~/.claude/teamai-statusline.sh
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
+  jq -r '.providers.claude.summary |
+    "TeamAI \(.available)/\(.enabled) free" +
+    (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'
+```
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claude/teamai-statusline.sh" } }
+```
+
+**告诉智能体。** 在项目的 `CLAUDE.md` 或 `AGENTS.md` 里加一行：“开始长任务或并行任务前，运行 `teamai usage --json` 并检查 `providers.claude.summary.available`”。这样该项目的每个会话不用打开仪表盘也能知道还剩多少余量。
+
+**额度耗尽时提醒。** 用 cron 或 LaunchAgent 定期读取摘要，在 `available` 降到 0 时发通知；列出 `error` 不为空的账号，就能知道哪些需要重新 `teamai login`。
+
 ## 配置
 
 配置和凭据存放在 `$TEAMAI_HOME` 中，若未设置则依次回退到 `$XDG_CONFIG_HOME/teamai` 和 `~/.config/teamai`。各代理均绑定在 `127.0.0.1` 上，并要求提供一个自动生成的本地客户端令牌。
@@ -175,7 +276,7 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只�
 | `proxy.host` | `127.0.0.1` | 绑定地址。按设计仅限回环地址。 |
 | `proxy.claudePort` | `3456` | Claude 中继端口。 |
 | `proxy.codexPort` | `3457` | Codex 中继端口。 |
-| `proxy.controlPort` | `3556` | TUI 通信所用的控制通道。 |
+| `proxy.controlPort` | `3556` | TUI 和 `teamai usage` 通信所用的控制通道（`/probe`、`GET /usage`）。 |
 | `proxy.clientToken` | 自动生成 | 每个被中继的客户端都必须发送的本地令牌。 |
 | `switchThreshold` | `0.98` | 用量比例超过该值后，该账号不再被选中。 |
 | `warmupIntervalMs` | `300000` | 后台重新测量的间隔。`0` 表示禁用。 |

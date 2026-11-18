@@ -72,6 +72,7 @@ teamai import codex
 
 ```bash
 teamai status                             # server state + accounts; use this to check health
+teamai usage --json                       # quota per account/window as JSON; live, spends no quota
 teamai accounts [claude|codex]            # accounts only
 teamai start                              # start relay + open dashboard (needs a TTY)
 teamai stop
@@ -81,6 +82,7 @@ teamai tui                                # dashboard only (needs a TTY)
 teamai enable  <claude|codex> <account>
 teamai disable <claude|codex> <account>
 teamai priority <claude|codex> <account> <rank|auto>
+teamai fable-only claude <account> on|off   # Fable first; no other model while its Fable window has budget
 teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png; no TTY needed
 ```
 
@@ -99,6 +101,12 @@ headlessly and writes it to `$TEAMAI_HOME/captures/` as `.txt` (colors kept)
 and `.png`, printing both paths. Account addresses are masked by default
 (`--redact partial`); `--redact full` numbers them, `--redact none` keeps them.
 Read the `.txt` for the data; never try to read the live TUI instead.
+
+For quota figures, prefer `teamai usage --json` over a capture: it is the
+same data as structured JSON (`source` is `live` when the server answered,
+`state` when it fell back to `state.json`). Over HTTP it is `GET /usage` on
+the control port with the client token; see the README section "Checking
+usage from other sessions and scripts".
 
 ### Launching sessions
 
@@ -135,6 +143,7 @@ before speculating; a port conflict is the common cause.
 | `src/providers.ts` | Claude/Codex specifics: headers, quota parsing, refresh |
 | `src/frame.ts` | The dashboard as text: display order, gauges, the frame builder both the TUI and capture draw through |
 | `src/tui.ts` | Interactive loop and key handling |
+| `src/usage.ts` | `teamai usage` / `GET /usage`: the quota report as JSON or a table, masked like captures |
 | `src/capture.ts` | `teamai capture` / the `p` key: redact, build the frame, write `.txt` + `.png` |
 | `src/redact.ts` | Account-address masking (partial / full / none), applied to data before drawing |
 | `src/png.ts` | Dependency-free PNG encoder (own CRC-32: `zlib.crc32` is Node 22.2+) and SGR-to-pixel renderer |

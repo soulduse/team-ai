@@ -69,9 +69,21 @@ export function claudeTier(profile: SubscriptionProfile | null | undefined): str
   return reported || 'OAuth';
 }
 // Limit-reset tickets the account holds: `R<n>` whole-week, `F<n>` Fable-only; nothing when it has none.
-export function resetTickets(credits: ResetCredits | null | undefined): string {
+export function resetTickets(credits: Pick<ResetCredits, 'general' | 'fable'> | null | undefined): string {
   if (!credits || (credits.general === 0 && credits.fable === 0)) return '';
   return [credits.general ? `R${credits.general}` : '', credits.fable ? `F${credits.fable}` : ''].filter(Boolean).join(' ');
+}
+// Counts survive a response without tickets, so one nobody has re-read in a day
+// (or of unknown age) may already be spent; it is shown dimmed / marked stale.
+const TICKETS_STALE_MS = 24 * 3_600_000;
+export function resetTicketsStale(credits: ResetCredits | null | undefined, now = Date.now()): boolean {
+  return !credits?.readAt || now - credits.readAt > TICKETS_STALE_MS;
+}
+// The `teamai accounts` suffix: ` resets R1 F3 (first expires 2026-12-10)`, or nothing.
+export function resetTicketsNote(credits: ResetCredits | null | undefined): string {
+  const tickets = resetTickets(credits); if (!tickets) return '';
+  const expiry = credits?.nextExpiry ? ` (first expires ${new Date(credits.nextExpiry).toISOString().slice(0, 10)})` : '';
+  return ` resets ${tickets}${expiry}${resetTicketsStale(credits) ? ', stale' : ''}`;
 }
 
 function renewal(profile: SubscriptionProfile | null | undefined): string {
@@ -180,17 +192,21 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     // Claude folded the 5-hour session limit into the weekly one; keep the
     // session column only while some account still reports a live 5h window.
     const claudeSession = group.some((account) => activeWindow(state.accounts[account.credentialId]?.windows?.['5h']));
+    // The tickets column costs 8 cells: only when some account holds tickets and the row still
+    // fits — head (53) + one gauge per window + renewal and age (up to 19) + the column itself.
+    const rowWithResets = 53 + (claudeSession ? 3 : 2) * (barWidth + 1) + 19 + 8;
+    const showResets = provider === 'claude' && rowWithResets <= width && group.some((account) => resetTickets(state.accounts[account.credentialId]?.resetCredits) !== '');
     const usageTitles = provider === 'claude'
-      ? `${claudeSession ? slot('5h session') : ''}${slot('7d overall')}${slot('7d Fable')} ${fit('resets', 7)}`
+      ? `${claudeSession ? slot('5h session') : ''}${slot('7d overall')}${slot('7d Fable')}${showResets ? ` ${fit('resets', 7)}` : ''}`
       : Array.from({ length: codexWindowCount }, (_, index) => slot(spanAt(index))).join('');
     lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
     for (const account of group) {
-      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
+      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : codexPlan(profile);
       const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-        lines.push(`${head} ${claudeSession ? `${bar(session?.usage, session?.resetsAt, barWidth)} ` : ''}${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ${color(36, fit(resetTickets(saved?.resetCredits), 7))} ~${renewColored} ${age(saved?.measuredAt)}`);
+        lines.push(`${head} ${claudeSession ? `${bar(session?.usage, session?.resetsAt, barWidth)} ` : ''}${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)}${showResets ? ` ${color(resetTicketsStale(saved?.resetCredits) ? 90 : 36, fit(resetTickets(saved?.resetCredits), 7))}` : ''} ~${renewColored} ${age(saved?.measuredAt)}`);
       } else {
         const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
         const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');

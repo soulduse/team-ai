@@ -162,7 +162,9 @@ teamai tui                                     # solo el panel, sin inicio autom
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # o bien: auto
+teamai fable-only claude user@example.com on  # o bien: off
 teamai capture [--redact partial|full|none] [--out DIR]   # guarda el panel como .txt y .png (sin TTY)
+teamai usage [--json] [--redact partial|full|none]       # cuota por cuenta y ventana, en tabla o JSON
 ```
 
 Las cuentas se ordenan según la cuota que les queda, de menor consumo a mayor,
@@ -196,7 +198,9 @@ la cuenta entera quede inactiva hasta una semana por un presupuesto que solo
 consume el modelo superior. Un 429 que rechaza una ventana compartida limita la
 cuenta como de costumbre.
 
-**Tickets de reinicio de límite.** Claude puede otorgar a una cuenta tickets de reinicio de límite. La columna `resets` y `teamai accounts` muestran cuántos tiene cada cuenta: `R<n>` reinicia todo el límite semanal y `F<n>` solo la ventana Fable. Se leen de la misma solicitud de uso que el relay ya hace (`?cedar_ember=1`); TeamAI solo los muestra y nunca canjea ninguno: úsalos desde Claude.
+**Cuentas solo Fable.** Desactivado por defecto en todas las cuentas: `teamai fable-only claude <cuenta> on` convierte una cuenta de Claude en la casa de Fable. Mientras su ventana semanal por modelo (Fable) tenga presupuesto, toda solicitud Fable va primero a ella —por delante de cualquier otra cuenta, incluso de una prioridad fijada— y no se le enruta ninguna solicitud de otro modelo (Opus, Sonnet, Haiku); solo los sondeos de cuota en segundo plano del propio relay pueden tocarla. La asignación de Fable es como mucho la mitad del límite semanal, así que cuando esa ventana se agota el resto de la semana de la cuenta quedaría ocioso: desde entonces Fable pasa a las demás cuentas y la cuenta solo Fable atiende los demás modelos como cualquier otra. El panel muestra su estado como `fable` mientras está reservada. Un relay en marcha aplica el cambio con `R` en el panel o con `teamai restart`.
+
+**Tickets de reinicio de límite.** Claude puede otorgar a una cuenta tickets de reinicio de límite. La columna `resets` y `teamai accounts` muestran cuántos tiene cada cuenta: `R<n>` reinicia todo el límite semanal y `F<n>` solo la ventana Fable. Se leen de la misma solicitud de uso que el relay ya hace (`?cedar_ember=1`); TeamAI solo los muestra y nunca canjea ninguno: úsalos desde Claude. La columna solo aparece cuando alguna cuenta tiene tickets y la fila todavía cabe en el ancho del terminal. Un recuento que nadie ha vuelto a leer en un día puede estar ya gastado, así que se atenúa (`, stale` en `teamai accounts`). Si el servidor rechaza la solicitud de tickets de una cuenta pero la lectura normal funciona, el relay lee la cuota de esa cuenta de la forma normal y deja de pedirle tickets durante seis horas.
 
 La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente la ventana `7d overall` y la ventana por modelo `7d Fable` (Claude integró su límite de sesión de 5 horas en el semanal en noviembre de 2026, así que la columna `5h session` solo aparece mientras alguna cuenta siga reportando una ventana de 5 horas activa); las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
 
@@ -216,6 +220,103 @@ Si llegan a la vez más solicitudes de las que puede atender la concurrencia com
 
 El valor de suscripción `~D-N` es una estimación, no una fecha de vencimiento autoritativa: el endpoint de perfil de Anthropic expone el estado de la suscripción y la fecha de creación, pero no el fin del periodo de facturación actual. Por eso TeamAI estima el siguiente aniversario mensual de facturación y lo marca con `~`. El estado del perfil se actualiza al arrancar el servidor y cada seis horas.
 
+## Consultar el uso desde otras sesiones y scripts
+
+El panel es para ti; `teamai usage` ofrece los mismos datos a todo lo demás: otra sesión de Claude Code o Codex, un script de shell, una línea de estado o un agente que decide si empezar un trabajo largo.
+
+```bash
+teamai usage                    # tabla: cada cuenta, cada ventana, tiempo hasta el reinicio
+teamai usage --json             # lo mismo en JSON
+teamai usage --json --redact full   # cuentas como "account #N"
+```
+
+```text
+TeamAI usage (live from the server, 2026-11-17T02:17:41.007Z)
+
+claude: 3/9 available, next reset 9h43m
+  ○ account #1  7d 98% (2d15h)  7d_oi 100% (2d15h)
+  ● account #5  7d 5% (6d17h)  7d_oi 8% (6d17h)
+  ● account #6  7d 35% (3d11h)  7d_oi 69% (3d11h)  [2 in flight]
+
+codex: 1/1 available, next reset 1d5h
+  ● account #8  primary 37% (1d5h)  secondary 0%
+```
+
+Con el relay en marcha, el informe sale en vivo de sus pools, con las peticiones en curso y el motivo de cada cooldown. Si no está en marcha (o es una versión anterior sin el endpoint), el mismo informe se construye desde `state.json`, y `source` indica cuál recibiste. No se mide nada para responder: no gasta cuota, así que puedes llamarlo tantas veces como quieras.
+
+El JSON, abreviado:
+
+```json
+{
+  "source": "live",
+  "generatedAt": "2026-11-17T02:17:41.007Z",
+  "providers": {
+    "claude": {
+      "summary": { "accounts": 9, "enabled": 9, "available": 3, "nextResetAt": "2026-11-17T12:00:00.475Z" },
+      "accounts": [{
+        "id": "…", "label": "de•••••••••w@gm•••.com", "enabled": true, "priority": null,
+        "plan": "default_claude_max_20x", "usage": 0.05,
+        "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
+                     "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
+        "error": null, "inflight": 0, "available": true
+      }]
+    },
+    "codex": { "summary": { "…": "…" }, "accounts": [] }
+  }
+}
+```
+
+`usage` es una fracción entre 0 y 1. Los nombres de ventana son los que reporta upstream: en Claude `7d` (semanal general), `7d_oi` (semanal del modelo superior) y `5h` mientras exista; en Codex `primary` y `secondary`. `available` significa habilitada, sin error, sin cooldown y por debajo de `switchThreshold`. `inflight` es `null` cuando el informe viene de `state.json`. `resetTickets` es `null` en Codex y en una cuenta de Claude cuyos tickets nunca se han leído; si no, es `{ general, fable, nextExpiry, readAt, stale }`, donde `stale` indica que el recuento tiene más de un día. Las direcciones se enmascaran como en las capturas (`--redact`); los tokens y credenciales nunca forman parte del informe.
+
+### El endpoint HTTP
+
+El mismo informe se sirve en el puerto de control, ligado a `127.0.0.1` y protegido por el token de cliente del relay como todo lo demás allí:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
+```
+
+`3556` es el valor por defecto de `proxy.controlPort`; si lo cambiaste, usa el tuyo (`jq .proxy.controlPort ~/.config/teamai/config.json`). Dentro de una sesión iniciada con `tac`, `$ANTHROPIC_AUTH_TOKEN` ya contiene ese token. En cualquier otro sitio, `teamai usage --json` es más sencillo: lee el token de tu configuración por sí mismo.
+
+### Formas de usarlo
+
+**Comprobar antes de un trabajo largo.** Un agente o un script puede mirar el margen antes de empezar algo que consumirá mucha cuota:
+
+```bash
+available=$(teamai usage --json | jq '.providers.claude.summary.available')
+[ "$available" -gt 0 ] || { echo "No Claude account free right now"; exit 1; }
+```
+
+**Esperar al reinicio en lugar de fallar.** Un trabajo por lotes puede dormir hasta que la ventana más próxima se renueve:
+
+```bash
+until [ "$(teamai usage --json | jq '.providers.claude.summary.available')" -gt 0 ]; do
+  sleep 600
+done
+```
+
+**Mostrarlo en la línea de estado de Claude Code.** Apunta `statusLine` en `~/.claude/settings.json` a un script pequeño; lee el endpoint directamente, así que es rápido:
+
+```bash
+#!/bin/sh
+# ~/.claude/teamai-statusline.sh
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
+  jq -r '.providers.claude.summary |
+    "TeamAI \(.available)/\(.enabled) free" +
+    (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'
+```
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claude/teamai-statusline.sh" } }
+```
+
+**Contárselo a un agente.** Añade una línea al `CLAUDE.md` o `AGENTS.md` de tu proyecto — "Antes de un trabajo largo o en paralelo, ejecuta `teamai usage --json` y revisa `providers.claude.summary.available`" — y cada sesión de ese proyecto sabrá cuánto margen queda sin abrir el panel.
+
+**Avisar cuando se agote.** Un cron o un LaunchAgent puede consultar el resumen y enviar una notificación cuando `available` llegue a 0, o listar las cuentas con `error` para saber cuáles necesitan `teamai login` de nuevo.
+
 ## Configuración
 
 La configuración y las credenciales viven en `$TEAMAI_HOME`, con respaldo en
@@ -229,7 +330,7 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `proxy.host` | `127.0.0.1` | Dirección de enlace. Solo loopback, por diseño. |
 | `proxy.claudePort` | `3456` | Puerto del relé de Claude. |
 | `proxy.codexPort` | `3457` | Puerto del relé de Codex. |
-| `proxy.controlPort` | `3556` | Canal de control con el que habla la TUI. |
+| `proxy.controlPort` | `3556` | Canal de control con el que hablan la TUI y `teamai usage` (`/probe`, `GET /usage`). |
 | `proxy.clientToken` | generado | Token local que debe enviar todo cliente que pase por el relé. |
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |
 | `warmupIntervalMs` | `300000` | Intervalo de remedición en segundo plano. `0` lo desactiva. |

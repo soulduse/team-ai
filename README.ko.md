@@ -135,7 +135,9 @@ teamai tui                                     # 대시보드만 (자동 기동 
 teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 또는: auto
+teamai fable-only claude user@example.com on  # 또는: off
 teamai capture [--redact partial|full|none] [--out DIR]   # 대시보드를 .txt + .png로 저장 (TTY 불필요)
+teamai usage [--json] [--redact partial|full|none]       # 계정·창별 사용량을 표 또는 JSON으로
 ```
 
 계정은 남은 할당량이 많은 순(적게 쓴 순)으로 정렬되며, 대시보드와 풀의 실제 선택 로직이 같은 순서를 씁니다 — 맨 윗줄이 다음 요청이 나갈 계정입니다. Claude는 전체 주간 창이 아니라 모델별 주간(Fable) 창으로 판정하는데, 최상위 모델을 먼저 거절하는 것이 실제로 그 창이기 때문입니다. 모든 계정이 소진되면 전부 동점이 되고, 그때는 가장 먼저 풀리는 순으로 넘어갑니다 — 오늘 아무도 요청을 처리할 수 없는 상황에서는 리셋까지 남은 시간만이 계정을 구분하는 유일한 기준입니다(Claude는 Fable 창, Codex는 주간 창 기준). 측정되지 않은 계정은 맨 뒤로 갑니다(알 수 없음은 비어 있음과 다릅니다). 고정된 우선순위는 여전히 우선하며, `c`로 설정된 순서로 되돌릴 수 있습니다.
@@ -144,7 +146,9 @@ teamai capture [--redact partial|full|none] [--out DIR]   # 대시보드를 .txt
 
 Fable 등급 429(`7d_oi`는 거절됐지만 공유 `7d` 창은 아직 허용된 경우)는 계정 전체가 아니라 그 계정의 Fable 창만 벤치합니다 — 최상위 모델만 소비하는 예산 때문에 계정 전체를 최대 일주일 놀리는 대신, 다른 모델은 그 계정에서 계속 처리됩니다. 공유 창을 거절하는 429는 평소대로 계정 전체를 벤치합니다.
 
-**한도 리셋 티켓.** Claude가 계정에 한도 리셋 티켓을 줄 때가 있습니다. `resets` 열과 `teamai accounts`가 계정마다 가진 수를 보여줍니다: `R<n>`은 주간 한도 전체, `F<n>`은 Fable 창만 리셋합니다. 릴레이가 이미 보내는 사용량 요청(`?cedar_ember=1`)에서 읽으며, TeamAI는 표시만 하고 티켓을 쓰지 않습니다 — 사용은 Claude에서 직접 하세요.
+**Fable 전용 계정.** 기본값은 모든 계정에서 꺼져 있습니다. `teamai fable-only claude <계정> on`으로 Claude 계정 하나를 Fable 전용으로 만듭니다. 그 계정의 모델별 주간(Fable) 창에 예산이 남아 있는 동안에는 모든 Fable 요청이 다른 어느 계정보다(고정 우선순위보다도) 먼저 그 계정으로 가고, 다른 모델(Opus, Sonnet, Haiku) 요청은 보내지 않습니다(릴레이 자체의 백그라운드 할당량 측정만 예외). Fable 한도는 주간 한도의 최대 절반이라, 그 창을 다 쓰면 계정의 남은 주간 여유가 놀게 됩니다. 그래서 그때부터는 Fable이 다른 계정으로 넘어가고, Fable 전용 계정은 다른 모델을 일반 계정처럼 처리합니다. 예약 중인 동안 대시보드 상태는 `fable`로 표시됩니다. 실행 중인 릴레이는 대시보드의 `R`이나 `teamai restart`로 변경을 반영합니다.
+
+**한도 리셋 티켓.** Claude가 계정에 한도 리셋 티켓을 줄 때가 있습니다. `resets` 열과 `teamai accounts`가 계정마다 가진 수를 보여줍니다: `R<n>`은 주간 한도 전체, `F<n>`은 Fable 창만 리셋합니다. 릴레이가 이미 보내는 사용량 요청(`?cedar_ember=1`)에서 읽으며, TeamAI는 표시만 하고 티켓을 쓰지 않습니다 — 사용은 Claude에서 직접 하세요. 이 열은 티켓을 가진 계정이 있고 행이 터미널 폭 안에 들어갈 때만 나타납니다. 하루 넘게 다시 읽지 못한 수는 이미 썼을 수 있어 흐리게 표시합니다(`teamai accounts`에서는 `, stale`). 어떤 계정에서 티켓 요청만 거부되고 일반 요청은 되면, 그 계정은 일반 방식으로 할당량만 읽고 6시간 동안 티켓을 다시 묻지 않습니다.
 
 전체 화면 TUI는 Claude와 Codex 계정을 그룹으로 묶고, 사용량이 바뀌어도 현재 선택된 계정을 고정해 둡니다. Claude 행은 `7d overall`과 모델 범위의 `7d Fable` 창을 각각 보여주고(Claude가 2026년 11월 5시간 세션 한도를 주간 한도로 통합했기 때문에, `5h session` 열은 살아 있는 5시간 창을 보고하는 계정이 있을 때만 나타납니다), Codex 행은 주/부 창을 해당 계정이 실제로 보고한 기간을 제목으로 달아(`1w limit`) 보여줍니다. 할당량은 공식 클라이언트 응답에서 학습하며 재시작해도 유지됩니다.
 
@@ -164,6 +168,103 @@ Fable 등급 429(`7d_oi`는 거절됐지만 공유 `7d` 창은 아직 허용된 
 
 `~D-N` 구독 값은 확정된 만료일이 아니라 추정치입니다. Anthropic의 프로필 엔드포인트는 구독 상태와 생성 시각은 주지만 현재 청구 주기의 종료일은 주지 않습니다. 그래서 TeamAI는 다음 월간 청구 기념일을 추정하고 `~`로 표시합니다. 프로필 상태는 서버 기동 시와 이후 6시간마다 갱신됩니다.
 
+## 다른 세션·스크립트에서 사용량 확인
+
+대시보드는 사람용이고, `teamai usage`는 같은 데이터를 나머지 모두에게 줍니다. 다른 Claude Code·Codex 세션, 셸 스크립트, 상태줄, 긴 작업을 시작할지 판단하는 에이전트가 쓸 수 있습니다.
+
+```bash
+teamai usage                    # 표: 계정별 모든 창과 리셋까지 남은 시간
+teamai usage --json             # 같은 내용을 JSON으로
+teamai usage --json --redact full   # 계정을 "account #N"으로 표시
+```
+
+```text
+TeamAI usage (live from the server, 2026-11-17T02:17:41.007Z)
+
+claude: 3/9 available, next reset 9h43m
+  ○ account #1  7d 98% (2d15h)  7d_oi 100% (2d15h)
+  ● account #5  7d 5% (6d17h)  7d_oi 8% (6d17h)
+  ● account #6  7d 35% (3d11h)  7d_oi 69% (3d11h)  [2 in flight]
+
+codex: 1/1 available, next reset 1d5h
+  ● account #8  primary 37% (1d5h)  secondary 0%
+```
+
+릴레이가 돌고 있으면 서버 메모리에서 실시간으로 답합니다. 진행 중 요청 수와 쿨다운 사유도 함께 나옵니다. 서버가 꺼져 있거나 이 엔드포인트가 없는 예전 버전이면 `state.json`으로 같은 보고서를 만들고, 어느 쪽인지는 `source`에 적힙니다. 답하려고 새로 측정하지 않으므로 할당량을 쓰지 않습니다. 몇 번을 불러도 괜찮습니다.
+
+JSON(일부 생략):
+
+```json
+{
+  "source": "live",
+  "generatedAt": "2026-11-17T02:17:41.007Z",
+  "providers": {
+    "claude": {
+      "summary": { "accounts": 9, "enabled": 9, "available": 3, "nextResetAt": "2026-11-17T12:00:00.475Z" },
+      "accounts": [{
+        "id": "…", "label": "de•••••••••w@gm•••.com", "enabled": true, "priority": null,
+        "plan": "default_claude_max_20x", "usage": 0.05,
+        "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
+                     "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
+        "error": null, "inflight": 0, "available": true
+      }]
+    },
+    "codex": { "summary": { "…": "…" }, "accounts": [] }
+  }
+}
+```
+
+`usage`는 0~1 사이의 비율입니다. 창 이름은 업스트림이 보고하는 그대로입니다. Claude는 `7d`(전체 주간), `7d_oi`(최상위 모델 주간), 남아 있는 동안의 `5h`이고, Codex는 `primary`·`secondary`입니다. `available`은 켜져 있고, 오류가 없고, 쿨다운 중이 아니고, `switchThreshold` 미만이라는 뜻입니다. `state.json`에서 만든 보고서면 `inflight`는 `null`입니다. `resetTickets`는 Codex 계정과 티켓을 한 번도 읽지 못한 Claude 계정에서는 `null`이고, 그 외에는 `{ general, fable, nextExpiry, readAt, stale }`입니다. `stale`은 그 수가 하루 넘게 지난 값이라는 뜻입니다. 계정 주소는 캡처와 같은 방식으로 가려지고(`--redact`), 토큰·자격증명은 보고서에 절대 들어가지 않습니다.
+
+### HTTP 엔드포인트
+
+같은 보고서를 제어 포트에서 줍니다. 이 포트는 `127.0.0.1`에만 열려 있고, 다른 경로와 똑같이 릴레이 클라이언트 토큰이 있어야 합니다.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3556/usage?redact=partial"
+```
+
+`3556`은 `proxy.controlPort`의 기본값입니다. 바꿨다면 설정한 값을 쓰세요(`jq .proxy.controlPort ~/.config/teamai/config.json`). `tac`로 시작한 세션 안에서는 `$ANTHROPIC_AUTH_TOKEN`이 곧 그 토큰입니다. 그 밖의 곳에서는 토큰을 설정에서 직접 읽는 `teamai usage --json`이 더 간단합니다.
+
+### 이렇게 활용할 수 있습니다
+
+**긴 작업 전에 확인하기.** 에이전트나 스크립트가 할당량을 많이 쓸 작업을 시작하기 전에 남은 여유를 확인합니다.
+
+```bash
+available=$(teamai usage --json | jq '.providers.claude.summary.available')
+[ "$available" -gt 0 ] || { echo "No Claude account free right now"; exit 1; }
+```
+
+**실패하는 대신 리셋까지 기다리기.** 배치 작업이 가장 빠른 창이 넘어갈 때까지 잠시 쉽니다.
+
+```bash
+until [ "$(teamai usage --json | jq '.providers.claude.summary.available')" -gt 0 ]; do
+  sleep 600
+done
+```
+
+**Claude Code 상태줄에 표시하기.** `~/.claude/settings.json`의 `statusLine`이 작은 스크립트를 가리키게 합니다. 엔드포인트를 직접 읽어서 빠릅니다.
+
+```bash
+#!/bin/sh
+# ~/.claude/teamai-statusline.sh
+config="${TEAMAI_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/teamai}/config.json"
+port=$(jq -r '.proxy.controlPort // 3556' "$config")
+curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:$port/usage" |
+  jq -r '.providers.claude.summary |
+    "TeamAI \(.available)/\(.enabled) free" +
+    (if .nextResetAt then " · reset in \(((.nextResetAt | sub("\\.[0-9]+Z$";"Z") | fromdate) - now) / 3600 | floor)h" else "" end)'
+```
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claude/teamai-statusline.sh" } }
+```
+
+**에이전트에게 알려 주기.** 프로젝트의 `CLAUDE.md`나 `AGENTS.md`에 "길거나 병렬인 작업 전에 `teamai usage --json`을 실행해 `providers.claude.summary.available`을 확인할 것" 한 줄을 넣으세요. 그 프로젝트의 모든 세션이 대시보드를 열지 않고도 남은 여유를 볼 수 있습니다.
+
+**바닥나면 알림 받기.** cron이나 LaunchAgent가 요약을 주기적으로 읽다가 `available`이 0이 되면 알림을 보내게 할 수 있습니다. `error`가 있는 계정 목록을 뽑으면 다시 `teamai login`이 필요한 계정도 알 수 있습니다.
+
 ## 설정
 
 설정과 자격증명은 `$TEAMAI_HOME`에 저장되며, 없으면 `$XDG_CONFIG_HOME/teamai`, 그다음 `~/.config/teamai` 순으로 결정됩니다. 프록시는 `127.0.0.1`에 바인딩하며 생성된 로컬 클라이언트 토큰을 요구합니다.
@@ -175,7 +276,7 @@ Fable 등급 429(`7d_oi`는 거절됐지만 공유 `7d` 창은 아직 허용된 
 | `proxy.host` | `127.0.0.1` | 바인드 주소. 설계상 루프백 전용. |
 | `proxy.claudePort` | `3456` | Claude 릴레이 포트. |
 | `proxy.codexPort` | `3457` | Codex 릴레이 포트. |
-| `proxy.controlPort` | `3556` | TUI가 통신하는 제어 채널. |
+| `proxy.controlPort` | `3556` | TUI와 `teamai usage`가 통신하는 제어 채널(`/probe`, `GET /usage`). |
 | `proxy.clientToken` | 자동 생성 | 릴레이되는 모든 클라이언트가 보내야 하는 로컬 토큰. |
 | `switchThreshold` | `0.98` | 이 사용률을 넘으면 해당 계정을 더 이상 선택하지 않음. |
 | `warmupIntervalMs` | `300000` | 백그라운드 재측정 주기. `0`이면 비활성화. |
