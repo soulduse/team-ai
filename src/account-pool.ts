@@ -351,7 +351,8 @@ export class AccountPool {
     // A Fable 429 marked the window spent (100%); a usage poll that then rounds the
     // same window down to 99% would hand it back to Fable for one more 429 and push
     // a fable-only account's other-model sessions off it again. Same window → keep it spent.
-    for (const [name, next] of Object.entries(quota.windows)) {
+    // Only a fable-only account (opt-in) holds the mark; others take the reading as is.
+    if (account.fableOnly) for (const [name, next] of Object.entries(quota.windows)) {
       const prev = account.windows[name];
       const sameWindow = prev?.resetsAt == null || next.resetsAt == null || Math.abs(next.resetsAt - prev.resetsAt) <= 5 * 60_000;
       if (/^7d_[a-z0-9]+$/i.test(name) && prev?.usage != null && prev.usage >= 1 && next.usage !== null && next.usage >= 0.99 && sameWindow) quota.windows[name] = { ...next, usage: 1 };

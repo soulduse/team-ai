@@ -568,6 +568,13 @@ test('a Fable window marked spent by a 429 stays spent when a poll of the same w
   next = quota(0.99, resetsAt + 7 * 86_400_000);
   pool.updateQuota(home, new Headers());
   assert.equal(home.windows['7d_oi']?.usage, 0.99);
+  // the floor is part of the opt-in: an ordinary account takes the same poll as read
+  const plain = pool.accounts.find((a) => a.id === 'a')!;
+  next = quota(0.99);
+  plain.windows = { '7d_oi': { usage: 0.5, resetsAt } };
+  pool.markFableSpent(plain, 0);
+  pool.updateQuota(plain, new Headers());
+  assert.equal(plain.windows['7d_oi']?.usage, 0.99);
 });
 
 test('fable-only: saturation, the 99% floor, a Codex account ignores the flag', () => {
