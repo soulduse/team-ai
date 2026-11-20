@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFrame, claudeTier, displayOrder, resetTicketsNote } from '../src/frame.js';
+import { buildFrame, claudeTier, DISPLAY_ITEMS, displayOrder, resetTicketsNote, toggleShown, visibleProviders } from '../src/frame.js';
 import { defaultConfig } from '../src/storage.js';
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
@@ -115,4 +115,63 @@ test('resets column: only when an account holds tickets and the row fits; dimmed
   assert.equal(resetTicketsNote({ general: 1, fable: 0, nextExpiry: Date.parse('2026-12-10T22:00:00Z'), readAt: Date.now() }), ' resets R1 (first expires 2026-12-10)');
   assert.equal(resetTicketsNote({ general: 0, fable: 2, nextExpiry: null }), ' resets F2, stale');
   assert.equal(resetTicketsNote({ general: 0, fable: 0, nextExpiry: null, readAt: Date.now() }), '');
+});
+
+test('display settings: hidden sections leave the frame and the cursor order', () => {
+  const config = { ...defaultConfig(), accounts: [account('claude', 'c@example.com'), account('codex', 'x@example.com')] };
+  const state = usage({ 'c@example.com': 0.3, 'x@example.com': 0.5 });
+  assert.equal(toggleShown(config, 'section:claude'), false);
+  assert.deepEqual(config.display?.hidden, ['section:claude']);
+  assert.deepEqual(visibleProviders(config), ['codex']);
+  assert.deepEqual(displayOrder(config.accounts, state, true, visibleProviders(config)).map((a) => a.label), ['x@example.com']);
+  const draw = () => buildFrame(config, state, { width: 120, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).map(plain);
+  assert.ok(!draw().some((line) => line.includes('Claude accounts') || line.includes('c@example.com')));
+  assert.ok(draw().some((line) => line.includes('Codex accounts (1)')));
+  toggleShown(config, 'section:codex');
+  assert.ok(draw().some((line) => line.includes('press v to show one')));
+  // Toggling again shows it, and the stored list keeps only what is hidden.
+  assert.equal(toggleShown(config, 'section:claude'), true);
+  assert.deepEqual(config.display?.hidden, ['section:codex']);
+});
+
+test('display settings: hidden gauges and columns drop out of titles and rows', () => {
+  const config = { ...defaultConfig(), accounts: [account('claude', 'c@example.com')] };
+  const state = usage({ 'c@example.com': 0.3 });
+  state.accounts['cred-c@example.com']!.windows!['7d'] = { usage: 0.4, resetsAt: null };
+  const draw = () => buildFrame(config, state, { width: 120, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).map(plain);
+  const title = () => draw().find((line) => line.trimStart().startsWith('account '))!;
+  const row = () => draw().find((line) => line.includes('c@example.com'))!;
+  assert.match(title(), /plan.*state.*order.*7d overall.*7d Fable/);
+  assert.match(row(), /40%.*30%/);
+  for (const key of ['gauge:7d', 'col:plan', 'col:order', 'col:renewal', 'col:age'] as const) toggleShown(config, key);
+  assert.ok(!title().includes('7d overall') && !title().includes('plan') && !title().includes('order'));
+  assert.match(title(), /state.*7d Fable/);
+  assert.ok(!row().includes('40%') && row().includes('30%'));
+  assert.ok(!row().includes('~') && !row().includes('unmeasured'));
+});
+
+test('display settings: activity can be hidden and the v menu lists every item', () => {
+  const config = { ...defaultConfig(), accounts: [account('claude', 'c@example.com')] };
+  const state: PersistedState = { ...usage({ 'c@example.com': 0.1 }), events: [{ at: Date.now(), message: 'POST /v1/messages' }] };
+  const draw = (mode: 'normal' | 'view', viewCursor = 0) => buildFrame(config, state, { width: 120, selectedId: null, mode, message: '', sortByHeadroom: true, viewCursor }).map(plain);
+  assert.ok(draw('normal').some((line) => line.includes('POST /v1/messages')));
+  assert.match(draw('normal').at(-1)!, /v view/);
+  toggleShown(config, 'activity');
+  assert.ok(!draw('normal').some((line) => line.includes('Activity') || line.includes('POST /v1/messages')));
+  const menu = draw('view', 2);
+  assert.equal(menu.filter((line) => /\[[x ]\]/.test(line)).length, DISPLAY_ITEMS.length);
+  assert.ok(menu.some((line) => line.startsWith('> [x]') && line.includes('Claude 5h session')));
+  assert.ok(menu.some((line) => line.includes('[ ]') && line.includes('Activity log')));
+  assert.match(menu.at(-1)!, /VIEW:/);
+});
+
+test('display settings: on a short terminal the v menu keeps its cursor and footer in view', () => {
+  const config = { ...defaultConfig(), accounts: Array.from({ length: 12 }, (_, i) => account('claude', `c${i}@example.com`)) };
+  const state = usage({});
+  for (const cursor of [0, 7, DISPLAY_ITEMS.length - 1]) {
+    const lines = buildFrame(config, state, { width: 100, height: 24, selectedId: null, mode: 'view', message: '', sortByHeadroom: true, viewCursor: cursor }).map(plain);
+    assert.equal(lines.length, 24);
+    assert.match(lines.at(-1)!, /VIEW:/);
+    assert.ok(lines.some((line) => line.startsWith('> ') && line.includes(DISPLAY_ITEMS[cursor]!.label)), `cursor ${cursor} visible`);
+  }
 });

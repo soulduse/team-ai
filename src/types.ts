@@ -1,5 +1,13 @@
 export type ProviderId = 'claude' | 'codex';
 
+// A part of the dashboard the user can hide from the `v` menu. Only hidden
+// items are stored, so anything added later shows up by default.
+export type DisplayItem =
+  | 'section:claude' | 'section:codex'
+  | 'gauge:5h' | 'gauge:7d' | 'gauge:fable' | 'gauge:resets' | 'gauge:codex-1' | 'gauge:codex-2'
+  | 'col:plan' | 'col:state' | 'col:order' | 'col:renewal' | 'col:age'
+  | 'activity';
+
 export interface StoredAccount {
   id: string;
   provider: ProviderId;
@@ -44,6 +52,8 @@ export interface TeamAIConfig {
   // is not consumed by Opus/Sonnet requests that any account could serve.
   // 1 disables the split and restores plain least-spent routing.
   fableReserveThreshold?: number;
+  // Dashboard parts the user switched off; display only, routing ignores it.
+  display?: { hidden?: DisplayItem[] };
   accounts: StoredAccount[];
 }
 
