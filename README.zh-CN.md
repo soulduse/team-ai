@@ -300,7 +300,7 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 
 0.1 版本面向的是订阅制 OAuth 账号以及由包装器启动的 CLI 会话。它不对外提供 OpenAI 兼容的公开 API，不把 Claude 请求转换成 Codex 请求，不支持 Codex Desktop，也不会把不同人的凭据混在一个池里共用。遵守各服务商条款与政策的责任在你自己。生产环境／商业用途的 API 负载应当使用服务商官方的 API 计费方式。
 
-**有意不支持 Gemini / Antigravity。** Antigravity CLI 没有任何文档化的方式把模型请求指向其他端点；个人账号的登录凭据只保存在系统钥匙串中，无法像 Codex、Grok 的登录那样交给 TeamAI；而且 Google 的 Antigravity 条款与 FAQ 明确禁止通过第三方工具或代理访问 Antigravity 的资源和配额，2026 年全年都有因此被停用账号的报告。Google 为第三方工具推荐的是 AI Studio 或 Vertex API 密钥，那是按量计费而不是订阅账号池，不在 TeamAI 的范围之内。
+**有意不支持 Gemini / Antigravity。** 各家服务商的条款都把轮换多个订阅账号以绕过用量限制视为超出正常使用范围，但真正执行的是 Google：Antigravity 的 FAQ 明确写明个人方案不支持“自动轮换账号”，条款把通过第三方软件访问 Antigravity 列为停用理由，而把 Antigravity 或 Gemini CLI 登录凭据集中使用的开源工具在 2026 年全年都报告过账号被成批停用（再次违规即永久封禁）。此外，Antigravity CLI 没有任何文档化的端点改写方式，个人账号的登录凭据只保存在系统钥匙串中，要集中使用就只能由 TeamAI 自己持有 Google 令牌。Google 为第三方工具推荐的是 AI Studio 或 Vertex API 密钥，那是按量计费而不是订阅账号池，不在 TeamAI 的范围之内。
 
 ## 开发
 
