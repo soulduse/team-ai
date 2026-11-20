@@ -5,13 +5,21 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { codexUserId } from './auth.js';
 import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
 
+const DEFAULT_GROK_PORT = 3458;
+
 export function dataDir(): string {
   return process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai');
 }
 export const paths = () => ({ config: join(dataDir(), 'config.json'), credentials: join(dataDir(), 'credentials.json'), state: join(dataDir(), 'state.json'), server: join(dataDir(), 'server.json') });
 
 export function defaultConfig(): TeamAIConfig {
-  return { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, controlPort: 3556, clientToken: `tai-${randomBytes(24).toString('base64url')}` }, switchThreshold: 0.98, warmupIntervalMs: 5 * 60_000, maxConcurrentPerAccount: 16, fableReserveThreshold: 0.8, accounts: [] };
+  return { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, grokPort: DEFAULT_GROK_PORT, controlPort: 3556, clientToken: `tai-${randomBytes(24).toString('base64url')}` }, switchThreshold: 0.98, warmupIntervalMs: 5 * 60_000, maxConcurrentPerAccount: 16, fableReserveThreshold: 0.8, accounts: [] };
+}
+
+// The port a provider's relay listens on. Grok's is optional in config (added
+// later), so an older config falls back to the built-in default.
+export function providerPort(proxy: TeamAIConfig['proxy'], id: ProviderId): number {
+  return id === 'claude' ? proxy.claudePort : id === 'codex' ? proxy.codexPort : proxy.grokPort ?? DEFAULT_GROK_PORT;
 }
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {

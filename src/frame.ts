@@ -2,19 +2,22 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
-import type { DisplayItem, PersistedState, ProviderId, StoredAccount, ResetCredits, SubscriptionProfile, TeamAIConfig } from './types.js';
+import { PROVIDER_IDS, type DisplayItem, type PersistedState, type ProviderId, type StoredAccount, type ResetCredits, type SubscriptionProfile, type TeamAIConfig } from './types.js';
+import { providerPort } from './storage.js';
 
 // Everything the `v` menu can show or hide, in menu order. The menu, the
 // stored keys and the frame all read this one list.
 export const DISPLAY_ITEMS: readonly { key: DisplayItem; label: string; group: string }[] = [
   { key: 'section:claude', label: 'Claude accounts', group: 'Section' },
   { key: 'section:codex', label: 'Codex accounts', group: 'Section' },
+  { key: 'section:grok', label: 'Grok accounts', group: 'Section' },
   { key: 'gauge:5h', label: 'Claude 5h session', group: 'Gauge' },
   { key: 'gauge:7d', label: 'Claude 7d overall', group: 'Gauge' },
   { key: 'gauge:fable', label: 'Claude 7d Fable', group: 'Gauge' },
   { key: 'gauge:resets', label: 'Claude reset tickets', group: 'Gauge' },
   { key: 'gauge:codex-1', label: 'Codex first limit', group: 'Gauge' },
   { key: 'gauge:codex-2', label: 'Codex second limit', group: 'Gauge' },
+  { key: 'gauge:grok', label: 'Grok weekly limit', group: 'Gauge' },
   { key: 'col:plan', label: 'Plan', group: 'Column' },
   { key: 'col:state', label: 'State', group: 'Column' },
   { key: 'col:order', label: 'Order', group: 'Column' },
@@ -22,7 +25,7 @@ export const DISPLAY_ITEMS: readonly { key: DisplayItem; label: string; group: s
   { key: 'col:age', label: 'Measured (4m ago)', group: 'Column' },
   { key: 'activity', label: 'Activity log', group: 'Panel' },
 ];
-const PROVIDERS: readonly ProviderId[] = ['claude', 'codex'];
+const PROVIDER_LABELS: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex', grok: 'Grok' };
 
 export function shown(config: Pick<TeamAIConfig, 'display'>, key: DisplayItem): boolean { return !config.display?.hidden?.includes(key); }
 export function toggleShown(config: TeamAIConfig, key: DisplayItem): boolean {
@@ -32,7 +35,7 @@ export function toggleShown(config: TeamAIConfig, key: DisplayItem): boolean {
   return !hidden.has(key);
 }
 // Providers whose section is on screen; the cursor only ever walks these.
-export function visibleProviders(config: Pick<TeamAIConfig, 'display'>): ProviderId[] { return PROVIDERS.filter((id) => shown(config, `section:${id}`)); }
+export function visibleProviders(config: Pick<TeamAIConfig, 'display'>): ProviderId[] { return PROVIDER_IDS.filter((id) => shown(config, `section:${id}`)); }
 
 export const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
 // Green, yellow and red are drawn as explicit colors rather than the
@@ -159,7 +162,7 @@ function windowLabel(minutes: number | null | undefined, fallback: string): stri
 // configured order. Everything that walks rows — rendering, ↑↓ movement, the
 // initial cursor — goes through this one function, so the cursor always lands
 // on the adjacent visible row rather than the adjacent entry in config.json.
-export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean, providers: readonly ProviderId[] = PROVIDERS): StoredAccount[] {
+export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean, providers: readonly ProviderId[] = PROVIDER_IDS): StoredAccount[] {
   // Mirrors AccountPool.byHeadroom: least-spent first on the binding window
   // (Claude's Fable bucket, Codex's main one), then — once they all tie at
   // spent — whichever frees up soonest, unmeasured last, pinned priority first.
@@ -167,7 +170,7 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
     const saved = state.accounts[account.credentialId];
     const windows = saved?.windows || {};
     const binding = Object.entries(windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]
-      ?? windows.primary ?? windows.requests ?? windows['7d'];
+      ?? windows.primary ?? windows.requests ?? windows.weekly ?? windows['7d'];
     return { usage: binding?.usage ?? saved?.usage ?? null, resetsAt: binding?.resetsAt ?? saved?.resetsAt ?? null };
   };
   const ordered: StoredAccount[] = [];
@@ -203,14 +206,23 @@ export interface FrameView {
   viewCursor?: number;
 }
 
+// The normal-mode key hints. When they do not fit, the ones a user is least
+// likely to need reminding of give way first, so quit and the launch keys stay.
+const DROP_ORDER = ['↑↓ move', 'd del', 'o order', 's pin', 'a add', 'e enable', 'R Reload', 'v view', 'p/P capture'];
+function normalHints(width: number, sortByHeadroom: boolean): string {
+  let hints = ['1 Claude', '2 Codex', '3 Grok', '↑↓ move', 's pin', 'e enable', 'o order', 'd del', 'a add', 'p/P capture', 'R Reload', 'v view', `c ${sortByHeadroom ? 'quota' : 'config'}-sort`, 'q quit'];
+  for (const drop of DROP_ORDER) { if (` ${hints.join('  ')}`.length <= width) break; hints = hints.filter((hint) => hint !== drop); }
+  return ` ${hints.join('  ')}`;
+}
+
 export function buildFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
   const { width, height, selectedId, mode, message, sortByHeadroom } = view;
   const on = (key: DisplayItem): boolean => shown(config, key);
   const providers = visibleProviders(config);
   const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, providers);
   const barWidth = width >= 120 ? 18 : 12; const lines: string[] = [];
-  const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
-  const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
+  const counts = PROVIDER_IDS.map((id) => `${PROVIDER_LABELS[id]} ${accounts.filter((account) => account.provider === id).length}`).join('  ');
+  const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  ${counts}  ${config.proxy.host}:${PROVIDER_IDS.map((id) => providerPort(config.proxy, id)).join('/')} `;
   lines.push(`${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`); lines.push('━'.repeat(width));
   if (!providers.length) lines.push(color(90, '  Every account section is hidden — press v to show one.'));
   // The fixed columns after the account name, each dropped when switched off.
@@ -218,7 +230,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   const headWidth = 26 + (on('col:plan') ? 11 : 0) + (on('col:state') ? 11 : 0) + (on('col:order') ? 5 : 0);
   for (const provider of providers) {
     const group = ordered.filter((account) => account.provider === provider); if (!group.length) continue;
-    const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;
+    const sectionTitle = ` ${PROVIDER_LABELS[provider]} accounts (${group.length}) `;
     lines.push(color(36, `┌─${sectionTitle}${'─'.repeat(Math.max(0, width - sectionTitle.length - 3))}┐`));
     // Column titles: the rows are dense and every field below is an
     // abbreviation, so name them once per section rather than expecting the
@@ -249,19 +261,25 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     // fits — head + one gauge per window + renewal and age (up to 19) + the column itself.
     const rowWithResets = headWidth + claudeGauges * (barWidth + 1) + (on('col:renewal') ? 7 : 0) + (on('col:age') ? 12 : 0) + 8;
     const showResets = provider === 'claude' && on('gauge:resets') && rowWithResets <= width && group.some((account) => resetTickets(state.accounts[account.credentialId]?.resetCredits) !== '');
+    // Grok has one weekly window; its title names the span the billing period reports.
+    const grokSpan = group.map((account) => state.accounts[account.credentialId]?.windows?.weekly?.minutes).find(Boolean);
     const usageTitles = provider === 'claude'
       ? `${claudeSession ? slot('5h session') : ''}${on('gauge:7d') ? slot('7d overall') : ''}${on('gauge:fable') ? slot('7d Fable') : ''}${showResets ? ` ${fit('resets', 7)}` : ''}`
+      : provider === 'grok' ? (on('gauge:grok') ? slot(`${windowLabel(grokSpan, 'weekly')} limit`) : '')
       : Array.from({ length: codexWindowCount }, (_, index) => index).filter(codexSlotOn).map((index) => slot(spanAt(index))).join('');
     lines.push(color(90, fit(`  ${fit('account', 24)}${headCells('plan', 'state', 'order')}${usageTitles}`, width)));
     for (const account of group) {
       const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
-      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : codexPlan(profile);
+      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : provider === 'codex' ? codexPlan(profile) : '—';
       const head = `${cursor} ${fit(account.label, 24)}${headCells(plan, enabled, rank)}`;
       const measured = on('col:age') ? ` ${age(saved?.measuredAt)}` : '';
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
         const gauges = [claudeSession ? bar(session?.usage, session?.resetsAt, barWidth) : '', on('gauge:7d') ? bar(weekly?.usage, weekly?.resetsAt, barWidth) : '', on('gauge:fable') ? bar(fable?.usage, fable?.resetsAt, barWidth) : ''].filter(Boolean).map((gauge) => ` ${gauge}`).join('');
         lines.push(`${head}${gauges}${showResets ? ` ${color(resetTicketsStale(saved?.resetCredits) ? 90 : 36, fit(resetTickets(saved?.resetCredits), 7))}` : ''}${on('col:renewal') ? ` ~${renewColored}` : ''}${measured}`);
+      } else if (provider === 'grok') {
+        const weekly = saved?.windows?.weekly;
+        lines.push(`${head}${weekly ? `${on('gauge:grok') ? ` ${bar(weekly.usage, weekly.resetsAt, barWidth)}` : ''}${measured}` : ` ${color(90, 'no quota data yet')}`}`);
       } else {
         const active = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
         const gauges = active.map((window, index) => (codexSlotOn(index) ? ` ${bar(window!.usage, window!.resetsAt, barWidth)}` : '')).join('');
@@ -290,11 +308,11 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   }
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
-  const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ move  s pin  e enable  o order  d del  a add  p/P capture  R Reload  v view  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit`
+  const footer = mode === 'normal' ? normalHints(width, sortByHeadroom)
     : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done'
       : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel'
         : mode === 'view' ? ' VIEW: ↑↓ select   Space/Enter show/hide   Esc done'
-          : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
+          : ' ADD: 1 Claude login   2 Codex login   3 Grok login   Esc cancel';
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';

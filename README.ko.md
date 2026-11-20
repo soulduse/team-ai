@@ -2,20 +2,20 @@
 
 [English](README.md) · **한국어** · [日本語](README.ja.md) · [中文](README.zh-CN.md) · [Español](README.es.md)
 
-TeamAI는 **Claude Code**와 공식 **Codex CLI**를 위한 로컬 다중 계정 릴레이입니다. 제공자별로 별도의 계정 풀을 유지하며, 선택된 구독 계정을 쓸 수 없거나 할당량이 소진되면 다른 계정으로 요청을 재시도합니다.
+TeamAI는 **Claude Code**, 공식 **Codex CLI**, 공식 **Grok CLI**를 위한 로컬 다중 계정 릴레이입니다. 제공자별로 별도의 계정 풀을 유지하며, 선택된 구독 계정을 쓸 수 없거나 할당량이 소진되면 다른 계정으로 요청을 재시도합니다.
 
 ![TeamAI 대시보드](docs/dashboard.png)
 
 <sub>위 대시보드는 <code>teamai capture --redact full</code>로 만든 실제 캡처입니다 — 실제 할당량과 활동 로그이며 계정 주소는 없습니다.</sub>
 
-> TeamAI는 독립적인 오픈소스 프로젝트입니다. Anthropic, OpenAI, 그리고 이와 무관한 teamai.com 서비스와 아무런 관련이 없습니다.
+> TeamAI는 독립적인 오픈소스 프로젝트입니다. Anthropic, OpenAI, xAI, 그리고 이와 무관한 teamai.com 서비스와 아무런 관련이 없습니다.
 
 ## 요구 사항
 
 - Node.js 20 이상
 - macOS, Linux 또는 Windows
 - `claude` 및/또는 `codex` 별도 설치
-- 본인 소유의 Claude Pro/Max/Ultra 또는 ChatGPT Codex 구독 계정
+- 본인 소유의 Claude Pro/Max/Ultra, ChatGPT Codex 또는 SuperGrok 구독 계정
 
 ## 설치
 
@@ -46,7 +46,7 @@ teamai login
 tai
 ```
 
-`login`은 `[1] Claude` 또는 `[2] Codex` 중 무엇을 추가할지 묻습니다. 계정을 더 넣으려면 반복 실행하세요. `tai`는 짧은 세션 명령이며 `teamai start`와 동일합니다 — 로컬 릴레이를 띄우고 대시보드를 엽니다. TUI에서 `1`을 누르면 Claude Code가, `2`를 누르면 Codex가 실행됩니다. 클라이언트를 종료하면 대시보드로 돌아옵니다.
+`login`은 `[1] Claude`, `[2] Codex`, `[3] Grok` 중 무엇을 추가할지 묻습니다. 계정을 더 넣으려면 반복 실행하세요. `tai`는 짧은 세션 명령이며 `teamai start`와 동일합니다 — 로컬 릴레이를 띄우고 대시보드를 엽니다. TUI에서 `1`을 누르면 Claude Code가, `2`를 누르면 Codex가, `3`을 누르면 Grok이 실행됩니다. 클라이언트를 종료하면 대시보드로 돌아옵니다.
 
 특정 제공자로 바로 세션을 시작하려면 전용 런처를 씁니다. 필요하면 릴레이를 자동으로 띄우고, 뒤에 붙인 인자를 모두 공식 클라이언트에 그대로 전달합니다.
 
@@ -55,9 +55,11 @@ tac                   # TeamAI 계정 풀을 통한 Claude Code
 tac --resume          # teamai claude --resume 와 동일
 tax                   # TeamAI 계정 풀을 통한 Codex
 tax resume            # teamai codex resume 와 동일
+tag                   # TeamAI 계정 풀을 통한 Grok CLI
 teamai claude         # tac의 긴 형태
 teamai codex          # tax의 긴 형태
-teamai session        # [1] Claude / [2] Codex 대화식 선택
+teamai grok           # tag의 긴 형태
+teamai session        # [1] Claude / [2] Codex / [3] Grok 대화식 선택
 ```
 
 이름은 기존 TeamClaude의 `tc` 셸 함수를 덮어쓰지 않도록 의도적으로 피했습니다. `tc`는 계속 TeamClaude를, `tac`과 `tax`는 TeamAI를 가리킵니다.
@@ -122,6 +124,8 @@ teamai import codex
 
 최근 버전의 Claude Code는 자격증명을 `~/.claude/.credentials.json` 대신 macOS 키체인에 저장할 수 있습니다. 그 경우에는 `teamai login`을 쓰세요. `import`는 원본 TeamClaude·Claude Code·Codex 파일을 절대 수정하지 않습니다. TeamAI는 릴레이 세션용으로 격리된 Codex 홈을 따로 유지하므로 사용자의 원래 `~/.codex`는 그대로 남습니다.
 
+**Grok.** `teamai login grok`은 일회용 `GROK_HOME`에서 `grok login`을 실행하므로, 계정마다 별도의 로그인을 갖게 되고 사용자의 `~/.grok` 세션은 교체되지도 공유되지도 않습니다. 풀에 넣을 수 있는 것은 xAI 자체 로그인(`auth.x.ai`)뿐이며, API 키나 회사 SSO 로그인은 넣을 수 없습니다. `teamai import grok`은 `~/.grok/auth.json`을 수정하지 않고 읽지만, 가져온 계정은 사용자의 `grok`과 리프레시 토큰 하나를 공유하게 됩니다. 먼저 갱신하는 쪽이 다른 쪽을 로그아웃시킬 수 있으므로, 직접도 쓰는 계정은 `login`으로 추가하는 편이 좋습니다. 릴레이 세션(`tag`)은 `$TEAMAI_HOME/grok-home`에서 릴레이의 클라이언트 토큰을 API 키로 삼아 실행됩니다 — `config.toml`은 복사되고 `skills`·`installed-plugins`·`hooks`는 링크되지만 로그인 정보는 넘어가지 않습니다 — 따라서 모든 모델 요청은 릴레이에 도달하고, 릴레이가 풀의 계정으로 전달합니다. Grok의 주간 한도는 `/usage` 화면이 쓰는 것과 같은 엔드포인트에서 읽으며, 할당량을 소모하지 않습니다.
+
 ## 운영
 
 ```bash
@@ -150,11 +154,11 @@ Fable 등급 429(`7d_oi`는 거절됐지만 공유 `7d` 창은 아직 허용된 
 
 **한도 리셋 티켓.** Claude가 계정에 한도 리셋 티켓을 줄 때가 있습니다. `resets` 열과 `teamai accounts`가 계정마다 가진 수를 보여줍니다: `R<n>`은 주간 한도 전체, `F<n>`은 Fable 창만 리셋합니다. 릴레이가 이미 보내는 사용량 요청(`?cedar_ember=1`)에서 읽으며, TeamAI는 표시만 하고 티켓을 쓰지 않습니다 — 사용은 Claude에서 직접 하세요. 이 열은 티켓을 가진 계정이 있고 행이 터미널 폭 안에 들어갈 때만 나타납니다. 하루 넘게 다시 읽지 못한 수는 이미 썼을 수 있어 흐리게 표시합니다(`teamai accounts`에서는 `, stale`). 어떤 계정에서 티켓 요청만 거부되고 일반 요청은 되면, 그 계정은 일반 방식으로 할당량만 읽고 6시간 동안 티켓을 다시 묻지 않습니다.
 
-전체 화면 TUI는 Claude와 Codex 계정을 그룹으로 묶고, 사용량이 바뀌어도 현재 선택된 계정을 고정해 둡니다. Claude 행은 `7d overall`과 모델 범위의 `7d Fable` 창을 각각 보여주고(Claude가 2026년 11월 5시간 세션 한도를 주간 한도로 통합했기 때문에, `5h session` 열은 살아 있는 5시간 창을 보고하는 계정이 있을 때만 나타납니다), Codex 행은 주/부 창을 해당 계정이 실제로 보고한 기간을 제목으로 달아(`1w limit`) 보여줍니다. 할당량은 공식 클라이언트 응답에서 학습하며 재시작해도 유지됩니다.
+전체 화면 TUI는 Claude와 Codex 계정을 그룹으로 묶고, 사용량이 바뀌어도 현재 선택된 계정을 고정해 둡니다. Claude 행은 `7d overall`과 모델 범위의 `7d Fable` 창을 각각 보여주고(Claude가 2026년 11월 5시간 세션 한도를 주간 한도로 통합했기 때문에, `5h session` 열은 살아 있는 5시간 창을 보고하는 계정이 있을 때만 나타납니다), Codex 행은 주/부 창을 해당 계정이 실제로 보고한 기간을 제목으로 달아(`1w limit`) 보여주며, Grok 행은 요금제의 주간 한도(`/usage` 화면에 표시되는 수치)를 보여줍니다. 할당량은 공식 클라이언트 응답에서 학습하며 재시작해도 유지됩니다.
 
-푸터는 TeamClaude와 동일한 계정 워크플로를 제공합니다 — Claude/Codex 실행, 선택, 전환, 활성/비활성, 순서, 삭제, 추가/로그인, 재측정(`R`), 종료. `switch`는 선택한 계정을 해당 제공자 풀의 맨 앞에 고정합니다. 순서 모드에서는 순위를 지정하거나 계정을 자동 스케줄링으로 되돌릴 수 있습니다. Claude 프로필을 갱신하면 요금제 등급(`Ultra`(구 Max 20x), `Max 5x`, `Pro` — TeamAI가 모르는 등급은 `OAuth`가 아니라 보고된 이름 그대로)과 `past_due` 같은 비정상 구독 상태가 빨간색으로 표시됩니다.
+푸터는 TeamClaude와 동일한 계정 워크플로를 제공합니다 — Claude/Codex/Grok 실행, 선택, 전환, 활성/비활성, 순서, 삭제, 추가/로그인, 재측정(`R`), 종료. `switch`는 선택한 계정을 해당 제공자 풀의 맨 앞에 고정합니다. 순서 모드에서는 순위를 지정하거나 계정을 자동 스케줄링으로 되돌릴 수 있습니다. Claude 프로필을 갱신하면 요금제 등급(`Ultra`(구 Max 20x), `Max 5x`, `Pro` — TeamAI가 모르는 등급은 `OAuth`가 아니라 보고된 이름 그대로)과 `past_due` 같은 비정상 구독 상태가 빨간색으로 표시됩니다.
 
-`v`는 표시 설정 메뉴를 엽니다. 계정 섹션(Claude, Codex), 게이지(Claude 5h session·7d overall·7d Fable·리셋 티켓, Codex 첫째·둘째 한도), plan·state·order·갱신일·측정 시각 열, Activity 로그를 Space나 Enter로 끄고 켤 수 있습니다. 선택은 `config.json`의 `display.hidden`에 저장되어 재시작 후와 `teamai capture`에도 유지되며, 화면 표시만 바꾸고 라우팅에는 영향이 없습니다. 숨긴 섹션에는 커서가 가지 않습니다. 푸터에서는 `v` 자리를 내기 위해 `s`(맨 앞 고정)를 `pin`, `d`를 `del`로 줄여 표시합니다.
+`v`는 표시 설정 메뉴를 엽니다. 계정 섹션(Claude, Codex, Grok), 게이지(Claude 5h session·7d overall·7d Fable·리셋 티켓, Codex 첫째·둘째 한도, Grok 주간 한도), plan·state·order·갱신일·측정 시각 열, Activity 로그를 Space나 Enter로 끄고 켤 수 있습니다. 선택은 `config.json`의 `display.hidden`에 저장되어 재시작 후와 `teamai capture`에도 유지되며, 화면 표시만 바꾸고 라우팅에는 영향이 없습니다. 숨긴 섹션에는 커서가 가지 않습니다. 푸터에서는 `s`(맨 앞 고정)를 `pin`, `d`를 `del`로 줄여 표시하며, 힌트가 터미널 너비보다 넓으면 덜 필요한 것부터(`↑↓ move`가 먼저) 빼고 종료와 실행 키는 항상 남깁니다.
 
 `p`는 대시보드를 캡처해 저장하고, `teamai capture`는 터미널 없이 스크립트나 에이전트에서 같은 일을 합니다. 캡처는 `~/.config/teamai/captures/`(또는 `--out DIR`) 아래 파일 한 쌍으로 남습니다 — 색상을 그대로 담은 텍스트 프레임과, 내장 비트맵 폰트로 그린 같은 프레임의 PNG. Node 외에 필요한 것이 없습니다. 계정 주소는 프레임을 그리기 전에 마스킹되므로 계정 열·푸터·활동 로그 어디에도 남지 않습니다. 기본은 `de•••••••••w@gm•••.com` 형태의 부분 마스킹이고, `--redact full`은 `account #N`으로 바꾸며, `--redact none`은 혼자 볼 캡처를 위해 주소를 그대로 둡니다. 대시보드에서 `p`는 기본 마스킹으로, `P`(shift)는 `account #N`으로 캡처하며, 둘 다 저장에 더해 파일 관리자에서 그 PNG를 선택한 채로 열고 이미지를 클립보드에 복사합니다 — macOS는 바로 되고, Linux는 `xdg-open`과 `wl-copy` 또는 `xclip`이 있을 때 되며, Windows에서는 파일만 저장되고 두 동작은 하지 않습니다. 어느 것이 실제로 됐는지는 푸터에 표시됩니다. 이 README 상단의 이미지도 그렇게 만든 캡처입니다.
 
@@ -217,7 +221,7 @@ JSON(일부 생략):
 }
 ```
 
-`usage`는 0~1 사이의 비율입니다. 창 이름은 업스트림이 보고하는 그대로입니다. Claude는 `7d`(전체 주간), `7d_oi`(최상위 모델 주간), 남아 있는 동안의 `5h`이고, Codex는 `primary`·`secondary`입니다. `available`은 켜져 있고, 오류가 없고, 쿨다운 중이 아니고, `switchThreshold` 미만이라는 뜻입니다. `state.json`에서 만든 보고서면 `inflight`는 `null`입니다. `resetTickets`는 Codex 계정과 티켓을 한 번도 읽지 못한 Claude 계정에서는 `null`이고, 그 외에는 `{ general, fable, nextExpiry, readAt, stale }`입니다. `stale`은 그 수가 하루 넘게 지난 값이라는 뜻입니다. 계정 주소는 캡처와 같은 방식으로 가려지고(`--redact`), 토큰·자격증명은 보고서에 절대 들어가지 않습니다.
+`usage`는 0~1 사이의 비율입니다. 창 이름은 업스트림이 보고하는 그대로입니다. Claude는 `7d`(전체 주간), `7d_oi`(최상위 모델 주간), 남아 있는 동안의 `5h`이고, Codex는 `primary`·`secondary`, Grok은 `weekly`입니다. `available`은 켜져 있고, 오류가 없고, 쿨다운 중이 아니고, `switchThreshold` 미만이라는 뜻입니다. `state.json`에서 만든 보고서면 `inflight`는 `null`입니다. `resetTickets`는 Codex 계정과 티켓을 한 번도 읽지 못한 Claude 계정에서는 `null`이고, 그 외에는 `{ general, fable, nextExpiry, readAt, stale }`입니다. `stale`은 그 수가 하루 넘게 지난 값이라는 뜻입니다. 계정 주소는 캡처와 같은 방식으로 가려지고(`--redact`), 토큰·자격증명은 보고서에 절대 들어가지 않습니다.
 
 ### HTTP 엔드포인트
 
@@ -278,6 +282,7 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 | `proxy.host` | `127.0.0.1` | 바인드 주소. 설계상 루프백 전용. |
 | `proxy.claudePort` | `3456` | Claude 릴레이 포트. |
 | `proxy.codexPort` | `3457` | Codex 릴레이 포트. |
+| `proxy.grokPort` | `3458` | Grok 릴레이 포트. 선택 사항이며, 이 키가 없는 이전 설정은 기본값을 씁니다. |
 | `proxy.controlPort` | `3556` | TUI와 `teamai usage`가 통신하는 제어 채널(`/probe`, `GET /usage`). |
 | `proxy.clientToken` | 자동 생성 | 릴레이되는 모든 클라이언트가 보내야 하는 로컬 토큰. |
 | `switchThreshold` | `0.98` | 이 사용률을 넘으면 해당 계정을 더 이상 선택하지 않음. |

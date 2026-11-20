@@ -1,10 +1,12 @@
-export type ProviderId = 'claude' | 'codex';
+// Every provider the relay fronts, in display order.
+export const PROVIDER_IDS = ['claude', 'codex', 'grok'] as const;
+export type ProviderId = typeof PROVIDER_IDS[number];
 
 // A part of the dashboard the user can hide from the `v` menu. Only hidden
 // items are stored, so anything added later shows up by default.
 export type DisplayItem =
-  | 'section:claude' | 'section:codex'
-  | 'gauge:5h' | 'gauge:7d' | 'gauge:fable' | 'gauge:resets' | 'gauge:codex-1' | 'gauge:codex-2'
+  | 'section:claude' | 'section:codex' | 'section:grok'
+  | 'gauge:5h' | 'gauge:7d' | 'gauge:fable' | 'gauge:resets' | 'gauge:codex-1' | 'gauge:codex-2' | 'gauge:grok'
   | 'col:plan' | 'col:state' | 'col:order' | 'col:renewal' | 'col:age'
   | 'activity';
 
@@ -37,6 +39,8 @@ export interface TeamAIConfig {
   version: 1;
   proxy: {
     host: string; claudePort: number; codexPort: number; controlPort?: number; clientToken: string;
+    // Optional so configs written before Grok support keep loading; see providerPort().
+    grokPort?: number;
     // Extra ports to keep answering on, per provider. Clients receive their base
     // URL at startup and cannot be redirected afterwards, so a port change would
     // otherwise strand every open session; listing the old port here keeps those

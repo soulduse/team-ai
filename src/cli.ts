@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import './threadpool.js';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmod, mkdir, open, readFile, writeFile, lstat, symlink } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rm, writeFile, lstat, symlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { connect } from 'node:net';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
-import { importAuth, loginClaude, loginCodex } from './auth.js';
+import { importAuth, login } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { resetTicketsNote } from './frame.js';
 import { relayedCodexConfig } from './codex-config.js';
@@ -14,21 +15,21 @@ import { launchCommand } from './launch.js';
 import { isRedactLevel } from './redact.js';
 import { buildUsageReport, formatUsageTable, type UsageReport } from './usage.js';
 import { releaseServerFile, runServer, runningPid } from './runtime.js';
-import { dataDir, loadConfig, loadState, paths, saveConfig, upsertAccount } from './storage.js';
+import { dataDir, loadConfig, loadState, paths, providerPort, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
-import type { ProviderId } from './types.js';
+import { PROVIDER_IDS, type ProviderId, type TeamAIConfig } from './types.js';
 
 const invokedAs = basename(process.argv[1] || 'teamai');
 const inputArgs = process.argv.slice(2);
-const invocation = invokedAs === 'tai' ? ['start', ...inputArgs] : invokedAs === 'tac' ? ['run', 'claude', ...inputArgs] : invokedAs === 'tax' ? ['run', 'codex', ...inputArgs] : inputArgs;
+const invocation = invokedAs === 'tai' ? ['start', ...inputArgs] : invokedAs === 'tac' ? ['run', 'claude', ...inputArgs] : invokedAs === 'tax' ? ['run', 'codex', ...inputArgs] : invokedAs === 'tag' ? ['run', 'grok', ...inputArgs] : inputArgs;
 const [command = 'help', ...args] = invocation;
 
-function provider(value?: string): ProviderId { if (value !== 'claude' && value !== 'codex') throw new Error('Provider must be claude or codex'); return value; }
+function provider(value?: string): ProviderId { const id = PROVIDER_IDS.find((x) => x === value); if (!id) throw new Error(`Provider must be ${PROVIDER_IDS.join(', ')}`); return id; }
 function flag(name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
 
 async function main(): Promise<void> {
   switch (command) {
-    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider('Login provider'); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
+    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider('Login provider'); const result = await login(id); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
     case 'import': { const id = provider(args[0]); const results = await importAuth(id, flag('--from')); for (const result of results) { const account = await upsertAccount(id, result.label, result.credential); console.log(`Imported ${id} account: ${account.label}`); } break; }
     case 'accounts': await accounts(args[0] ? provider(args[0]) : undefined); break;
     case 'enable': await toggle(true); break;
@@ -44,6 +45,7 @@ async function main(): Promise<void> {
     case 'session': await runClient(await selectProvider('Select session'), args.filter((x) => x !== '--')); break;
     case 'claude': await runClient('claude', args.filter((x) => x !== '--')); break;
     case 'codex': await runClient('codex', args.filter((x) => x !== '--')); break;
+    case 'grok': await runClient('grok', args.filter((x) => x !== '--')); break;
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
     case 'tui': await runTui(); break;
     case 'capture': {
@@ -57,13 +59,14 @@ async function main(): Promise<void> {
 }
 
 async function selectProvider(promptLabel: string): Promise<ProviderId> {
-  if (!process.stdin.isTTY) throw new Error('Specify claude or codex explicitly in a non-interactive shell');
+  if (!process.stdin.isTTY) throw new Error(`Specify ${PROVIDER_IDS.join(', ')} explicitly in a non-interactive shell`);
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await prompt.question(`${promptLabel} — [1] Claude, [2] Codex: `)).trim().toLowerCase();
+    const answer = (await prompt.question(`${promptLabel} — [1] Claude, [2] Codex, [3] Grok: `)).trim().toLowerCase();
     if (answer === '1' || answer === 'c' || answer === 'claude') return 'claude';
     if (answer === '2' || answer === 'x' || answer === 'codex') return 'codex';
-    throw new Error('Choose 1 for Claude or 2 for Codex');
+    if (answer === '3' || answer === 'g' || answer === 'grok') return 'grok';
+    throw new Error('Choose 1 for Claude, 2 for Codex or 3 for Grok');
   } finally { prompt.close(); }
 }
 
@@ -136,12 +139,21 @@ async function ensureServer(): Promise<void> {
   throw new Error(detail ? `TeamAI server did not start: ${detail}` : `TeamAI server did not start (see ${log})`);
 }
 
+// A relay started before this provider had any account does not listen for it
+// (runtime.ts skips empty pools); say so instead of a bare connection refused.
+async function assertListening(proxy: TeamAIConfig['proxy'], id: ProviderId): Promise<void> {
+  const port = providerPort(proxy, id);
+  const open = await new Promise<boolean>((resolve) => { const socket = connect(port, proxy.host); socket.setTimeout(2_000); socket.once('connect', () => { socket.destroy(); resolve(true); }); socket.once('timeout', () => { socket.destroy(); resolve(false); }); socket.once('error', () => resolve(false)); });
+  if (!open) throw new Error(`The running relay is not serving ${id} on ${proxy.host}:${port} — it started before this account was added. Run "teamai restart".`);
+}
+
 async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
-  const config = await loadConfig(); if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer();
+  const config = await loadConfig(); if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer(); await assertListening(config.proxy, id);
   if (id === 'claude') {
     const launch = launchCommand('claude', clientArgs); const result = spawnSync(launch.file, launch.args, { stdio: 'inherit', windowsVerbatimArguments: launch.windowsVerbatimArguments, env: { ...process.env, ANTHROPIC_BASE_URL: `http://${config.proxy.host}:${config.proxy.claudePort}`, ANTHROPIC_AUTH_TOKEN: config.proxy.clientToken } });
     if (result.error) throw result.error; process.exitCode = result.status ?? 1; return;
   }
+  if (id === 'grok') { await runGrok(config.proxy, clientArgs); return; }
   const shadow = join(process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai'), 'codex-home'); await mkdir(shadow, { recursive: true, mode: 0o700 });
   const originalHome = process.env.CODEX_HOME || join(homedir(), '.codex'); let original = ''; try { original = await readFile(join(originalHome, 'config.toml'), 'utf8'); } catch { /* optional */ }
   await writeFile(join(shadow, 'config.toml'), relayedCodexConfig(original, config.proxy.host, config.proxy.codexPort), { mode: 0o600 }); await chmod(shadow, 0o700);
@@ -174,18 +186,38 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
   if (result.error) throw result.error; process.exitCode = result.status ?? 1;
 }
 
-function help(): void { console.log(`TeamAI — multi-account relay for Claude Code and Codex CLI
+// Grok in a home of its own, signed in with nothing but the relay's client
+// token as an API key: every request then reaches the relay, which swaps in a
+// pooled account. The user's ~/.grok settings, skills and plugins are reused;
+// its sign-in is not, and an auth.json left in the shadow home is removed —
+// a session token there would win over the key and bypass the relay.
+async function runGrok(proxy: TeamAIConfig['proxy'], clientArgs: string[]): Promise<void> {
+  const shadow = join(dataDir(), 'grok-home'); await mkdir(shadow, { recursive: true, mode: 0o700 }); await chmod(shadow, 0o700);
+  await rm(join(shadow, 'auth.json'), { force: true });
+  const originalHome = process.env.GROK_HOME || join(homedir(), '.grok');
+  try { await writeFile(join(shadow, 'config.toml'), await readFile(join(originalHome, 'config.toml')), { mode: 0o600 }); } catch { /* optional */ }
+  for (const name of ['skills', 'installed-plugins', 'hooks']) { const source = join(originalHome, name); const target = join(shadow, name); try { await lstat(target); } catch { try { await lstat(source); await symlink(source, target, 'dir'); } catch { /* optional */ } } }
+  const base = `http://${proxy.host}:${providerPort(proxy, 'grok')}/v1`;
+  const env: NodeJS.ProcessEnv = { ...process.env, GROK_HOME: shadow, XAI_API_KEY: proxy.clientToken, GROK_CLI_CHAT_PROXY_BASE_URL: base, GROK_XAI_API_BASE_URL: base };
+  delete env.GROK_AUTH; delete env.GROK_AUTH_PATH;
+  const launch = launchCommand('grok', clientArgs); const result = spawnSync(launch.file, launch.args, { stdio: 'inherit', windowsVerbatimArguments: launch.windowsVerbatimArguments, env });
+  if (result.error) throw result.error; process.exitCode = result.status ?? 1;
+}
+
+function help(): void { console.log(`TeamAI — multi-account relay for Claude Code, Codex CLI and Grok CLI
 
 Usage:
   tai                                  Open the TeamAI dashboard
   tac [CLAUDE_ARGS...]                 Start a relayed Claude Code session
   tax [CODEX_ARGS...]                  Start a relayed Codex session
+  tag [GROK_ARGS...]                   Start a relayed Grok session
   teamai claude [CLAUDE_ARGS...]       Start a relayed Claude Code session
   teamai codex [CODEX_ARGS...]         Start a relayed Codex session
-  teamai session [CLIENT_ARGS...]      Choose Claude or Codex interactively
-  teamai login [claude|codex]
-  teamai import <claude|codex> [--from PATH]
-  teamai accounts [claude|codex]
+  teamai grok [GROK_ARGS...]           Start a relayed Grok session
+  teamai session [CLIENT_ARGS...]      Choose Claude, Codex or Grok
+  teamai login [claude|codex|grok]
+  teamai import <claude|codex|grok> [--from PATH]
+  teamai accounts [claude|codex|grok]
   teamai start|restart|status|stop
   teamai usage [--json] [--redact partial|full|none]
                                        Quota per account and window, live from
@@ -197,6 +229,6 @@ Usage:
                                        Save the dashboard as .txt and .png,
                                        account addresses masked (no TTY needed)
 
-Run "teamai start", then press 1 for Claude Code or 2 for Codex.`); }
+Run "teamai start", then press 1 for Claude Code, 2 for Codex or 3 for Grok.`); }
 
 main().catch((error) => { console.error(`teamai: ${(error as Error).message}`); process.exitCode = 1; });

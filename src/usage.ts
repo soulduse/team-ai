@@ -8,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { AccountPool } from './account-pool.js';
 import { resetTickets, resetTicketsStale } from './frame.js';
 import { isRedactLevel, maskLabel, redactor, type RedactLevel } from './redact.js';
-import type { LiveAccountStatus, PersistedState, ProviderId, TeamAIConfig } from './types.js';
+import { PROVIDER_IDS, type LiveAccountStatus, type PersistedState, type ProviderId, type TeamAIConfig } from './types.js';
 
 export interface UsageWindowReport { usage: number | null; resetsAt: string | null; resetsInMs: number | null; minutes?: number | null }
 
@@ -52,8 +52,8 @@ export function buildUsageReport(config: TeamAIConfig, state: PersistedState, op
   const now = options.now ?? Date.now(); const level = options.level ?? 'partial';
   const mask = redactor(config.accounts, level);
   const live = new Map((options.live ?? []).map((status) => [status.credentialId, status]));
-  const providers = { claude: { summary: { accounts: 0, enabled: 0, available: 0, nextResetAt: null }, accounts: [] }, codex: { summary: { accounts: 0, enabled: 0, available: 0, nextResetAt: null }, accounts: [] } } as Record<ProviderId, UsageProviderReport>;
-  const nextReset: Record<ProviderId, number | null> = { claude: null, codex: null };
+  const providers = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { summary: { accounts: 0, enabled: 0, available: 0, nextResetAt: null }, accounts: [] }])) as unknown as Record<ProviderId, UsageProviderReport>;
+  const nextReset = Object.fromEntries(PROVIDER_IDS.map((id) => [id, null])) as Record<ProviderId, number | null>;
   config.accounts.forEach((account, index) => {
     const saved = state.accounts[account.credentialId]; const status = live.get(account.credentialId);
     const windows: Record<string, UsageWindowReport> = {};
@@ -83,7 +83,7 @@ export function buildUsageReport(config: TeamAIConfig, state: PersistedState, op
     });
     group.summary.accounts++; if (account.enabled) group.summary.enabled++; if (available) group.summary.available++;
   });
-  for (const id of ['claude', 'codex'] as const) providers[id].summary.nextResetAt = iso(nextReset[id]);
+  for (const id of PROVIDER_IDS) providers[id].summary.nextResetAt = iso(nextReset[id]);
   return { source: options.source, generatedAt: new Date(now).toISOString(), providers };
 }
 
@@ -93,8 +93,9 @@ const percent = (usage: number | null | undefined): string => (usage == null ? '
 // the soonest of them rolls over.
 export function formatUsageTable(report: UsageReport): string {
   const lines = [`TeamAI usage (${report.source === 'live' ? 'live from the server' : 'from state.json — server down or older than /usage'}, ${report.generatedAt})`];
-  for (const id of ['claude', 'codex'] as const) {
-    const group = report.providers[id]; if (!group.accounts.length) continue;
+  for (const id of PROVIDER_IDS) {
+    // A report from an older server has no entry for a newer provider.
+    const group = report.providers[id]; if (!group?.accounts.length) continue;
     lines.push('', `${id}: ${group.summary.available}/${group.summary.enabled} available${group.summary.nextResetAt ? `, next reset ${AccountPool.formatDuration(Date.parse(group.summary.nextResetAt) - Date.parse(report.generatedAt))}` : ''}`);
     for (const account of group.accounts) {
       const windows = Object.entries(account.windows).map(([name, w]) => `${name} ${percent(w.usage)}${w.resetsInMs != null ? ` (${AccountPool.formatDuration(w.resetsInMs)})` : ''}`).join('  ');

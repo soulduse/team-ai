@@ -122,16 +122,16 @@ test('display settings: hidden sections leave the frame and the cursor order', (
   const state = usage({ 'c@example.com': 0.3, 'x@example.com': 0.5 });
   assert.equal(toggleShown(config, 'section:claude'), false);
   assert.deepEqual(config.display?.hidden, ['section:claude']);
-  assert.deepEqual(visibleProviders(config), ['codex']);
+  assert.deepEqual(visibleProviders(config), ['codex', 'grok']);
   assert.deepEqual(displayOrder(config.accounts, state, true, visibleProviders(config)).map((a) => a.label), ['x@example.com']);
   const draw = () => buildFrame(config, state, { width: 120, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).map(plain);
   assert.ok(!draw().some((line) => line.includes('Claude accounts') || line.includes('c@example.com')));
   assert.ok(draw().some((line) => line.includes('Codex accounts (1)')));
-  toggleShown(config, 'section:codex');
+  toggleShown(config, 'section:codex'); toggleShown(config, 'section:grok');
   assert.ok(draw().some((line) => line.includes('press v to show one')));
   // Toggling again shows it, and the stored list keeps only what is hidden.
   assert.equal(toggleShown(config, 'section:claude'), true);
-  assert.deepEqual(config.display?.hidden, ['section:codex']);
+  assert.deepEqual(config.display?.hidden, ['section:codex', 'section:grok']);
 });
 
 test('display settings: hidden gauges and columns drop out of titles and rows', () => {
@@ -158,7 +158,7 @@ test('display settings: activity can be hidden and the v menu lists every item',
   assert.match(draw('normal').at(-1)!, /v view/);
   toggleShown(config, 'activity');
   assert.ok(!draw('normal').some((line) => line.includes('Activity') || line.includes('POST /v1/messages')));
-  const menu = draw('view', 2);
+  const menu = draw('view', DISPLAY_ITEMS.findIndex((item) => item.key === 'gauge:5h'));
   assert.equal(menu.filter((line) => /\[[x ]\]/.test(line)).length, DISPLAY_ITEMS.length);
   assert.ok(menu.some((line) => line.startsWith('> [x]') && line.includes('Claude 5h session')));
   assert.ok(menu.some((line) => line.includes('[ ]') && line.includes('Activity log')));
@@ -174,4 +174,22 @@ test('display settings: on a short terminal the v menu keeps its cursor and foot
     assert.match(lines.at(-1)!, /VIEW:/);
     assert.ok(lines.some((line) => line.startsWith('> ') && line.includes(DISPLAY_ITEMS[cursor]!.label)), `cursor ${cursor} visible`);
   }
+});
+
+test('Grok section: weekly gauge, header counts and ports, and its show/hide items', () => {
+  const config = { ...defaultConfig(), accounts: [account('claude', 'c@example.com'), { ...account('codex', 'x@example.com'), provider: 'grok' as const, label: 'g@example.com', credentialId: 'cred-g@example.com' }] };
+  const state = usage({ 'c@example.com': 0.3 });
+  state.accounts['cred-g@example.com'] = { usage: 0.94, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows: { weekly: { usage: 0.94, resetsAt: Date.now() + 3 * 86_400_000, minutes: 10080 } } };
+  const draw = (width = 120) => buildFrame(config, state, { width, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).map(plain);
+  const lines = draw();
+  assert.match(lines[0]!, /Claude 1 {2}Codex 0 {2}Grok 1 {2}127\.0\.0\.1:3456\/3457\/3458/);
+  assert.ok(lines.some((line) => line.includes('Grok accounts (1)')));
+  assert.ok(lines.some((line) => line.trimStart().startsWith('account ') && line.includes('1w limit')));
+  assert.match(lines.find((line) => line.includes('g@example.com'))!, /—.*active.*94% 3d/);
+  toggleShown(config, 'gauge:grok');
+  assert.ok(!draw().find((line) => line.includes('g@example.com'))!.includes('94%'));
+  // Narrow terminals drop the least-needed key hints, never quit or the launch keys.
+  const footer = draw(80).at(-1)!.trimEnd();
+  assert.match(footer, /1 Claude {2}2 Codex {2}3 Grok/); assert.match(footer, /q quit$/); assert.ok(!footer.includes('…'));
+  assert.match(draw(120).at(-1)!, /3 Grok.*p\/P capture.*v view.*q quit/);
 });

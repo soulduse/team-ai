@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { claudeProvider, claudeResetCredits, claudeUsageQuota, codexProvider, codexUsageQuota } from '../src/providers.js';
+import { claudeProvider, claudeResetCredits, claudeUsageQuota, codexProvider, codexUsageQuota, grokProvider, grokUsageQuota } from '../src/providers.js';
 import { resetTickets } from '../src/frame.js';
 import type { ResetCredits, RuntimeAccount } from '../src/types.js';
 
@@ -335,4 +335,40 @@ test('Claude fetchUsage asks for tickets with the live UA, never retries 401/429
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test('Grok provider relays only model paths and swaps the client key for the account token', () => {
+  assert.equal(grokProvider.normalizePath('/v1/responses'), '/v1/responses');
+  assert.equal(grokProvider.normalizePath('/v1/models?x=1'), '/v1/models?x=1');
+  assert.equal(grokProvider.normalizePath('/v1/billing?format=credits'), null);
+  assert.equal(grokProvider.normalizePath('/v1/traces'), null);
+  const grokAccount = { ...account, provider: 'grok' } as RuntimeAccount;
+  const headers = grokProvider.buildHeaders(new Headers({ authorization: 'Bearer tai-client', 'x-xai-token-auth': 'xai-grok-cli', cookie: 'private', 'x-grok-conv-group-id': 'g1' }), grokAccount);
+  assert.equal(headers.get('authorization'), 'Bearer secret'); assert.equal(headers.get('x-xai-token-auth'), 'xai-grok-cli'); assert.equal(headers.has('cookie'), false); assert.equal(headers.get('x-grok-conv-group-id'), 'g1');
+});
+
+test('Grok provider keys a session by its conversation group, then prompt_cache_key', () => {
+  assert.equal(grokProvider.sessionKey!(new Headers({ 'x-grok-conv-group-id': 'group-1', 'x-grok-session-id': 's' }), Buffer.alloc(0)), 'group-1');
+  assert.equal(grokProvider.sessionKey!(new Headers({ 'x-grok-session-id': '' }), Buffer.from('{"prompt_cache_key":"cache-1"}')), 'cache-1');
+  assert.equal(grokProvider.sessionKey!(new Headers(), Buffer.from('not json')), null);
+});
+
+test('Grok failures: plan-spent 429s bench the account, others are transient', () => {
+  assert.equal(grokProvider.classifyFailure(401, new Headers(), '').kind, 'auth');
+  const spent = grokProvider.classifyFailure(429, new Headers(), '{"error":{"code":"usage_limit_reached"}}');
+  assert.equal(spent.kind, 'quota'); assert.equal(spent.retryAfterMs, 3_600_000);
+  assert.equal(grokProvider.classifyFailure(429, new Headers({ 'retry-after': '120' }), '{"error_type":"usage_pool_exhausted"}').retryAfterMs, 120_000);
+  assert.equal(grokProvider.classifyFailure(429, new Headers(), '{"error":{"code":"rate_limited"}}').kind, 'transient');
+  assert.equal(grokProvider.classifyFailure(503, new Headers(), '').kind, 'transient');
+  assert.equal(grokProvider.readQuota(new Headers({ 'x-ratelimit-remaining-requests': '1' })), null);
+});
+
+test('grokUsageQuota reads the weekly window from /v1/billing', () => {
+  const quota = grokUsageQuota({ config: { creditUsagePercent: 94, currentPeriod: { start: '2026-11-16T01:47:27.026512+00:00', end: '2026-11-23T01:47:27.026512+00:00' } } });
+  assert.equal(quota?.routingUsage, 0.94);
+  assert.equal(quota?.windows.weekly?.resetsAt, Date.parse('2026-11-23T01:47:27.026Z'));
+  assert.equal(quota?.windows.weekly?.minutes, 10080);
+  assert.equal(grokUsageQuota({ config: { creditUsagePercent: 140 } })?.routingUsage, 1);
+  assert.equal(grokUsageQuota({ config: {} }), null);
+  assert.equal(grokUsageQuota({}), null);
 });

@@ -2,20 +2,20 @@
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [中文](README.zh-CN.md) · **Español**
 
-TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **Codex**. Mantiene un grupo de cuentas independiente para cada proveedor y reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota.
+TeamAI es un relé local multicuenta para **Claude Code**, la CLI oficial de **Codex** y la CLI oficial de **Grok**. Mantiene un grupo de cuentas independiente para cada proveedor y reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota.
 
 ![Panel de TeamAI](docs/dashboard.png)
 
 <sub>El panel de arriba es una captura real hecha con <code>teamai capture --redact full</code>: cuota y actividad reales, sin direcciones de cuentas.</sub>
 
-> TeamAI es un proyecto de código abierto independiente. No está afiliado a Anthropic, a OpenAI ni al servicio no relacionado de teamai.com.
+> TeamAI es un proyecto de código abierto independiente. No está afiliado a Anthropic, a OpenAI, a xAI ni al servicio no relacionado de teamai.com.
 
 ## Requisitos
 
 - Node.js 20 o superior
 - macOS, Linux o Windows
 - `claude` y/o `codex` instalados por separado
-- Tus propias cuentas de suscripción Claude Pro/Max/Ultra o ChatGPT Codex
+- Tus propias cuentas de suscripción Claude Pro/Max/Ultra, ChatGPT Codex o SuperGrok
 
 ## Instalación
 
@@ -55,7 +55,7 @@ teamai login
 tai
 ```
 
-`login` pregunta si quieres agregar `[1] Claude` o `[2] Codex`. Repítelo para sumar más cuentas. `tai` es el comando corto de sesión y equivale a `teamai start`: levanta el relé local y abre el panel. Desde la TUI, pulsa `1` para lanzar Claude Code o `2` para lanzar Codex. Cuando el cliente termina, vuelves al panel.
+`login` pregunta si quieres agregar `[1] Claude`, `[2] Codex` o `[3] Grok`. Repítelo para sumar más cuentas. `tai` es el comando corto de sesión y equivale a `teamai start`: levanta el relé local y abre el panel. Desde la TUI, pulsa `1` para lanzar Claude Code, `2` para lanzar Codex o `3` para lanzar Grok. Cuando el cliente termina, vuelves al panel.
 
 Para iniciar una sesión directa con un proveedor, usa los lanzadores dedicados. Inician el relé de TeamAI automáticamente cuando hace falta y pasan todos los argumentos finales al cliente oficial:
 
@@ -64,9 +64,11 @@ tac                   # Claude Code a través del grupo de cuentas de TeamAI
 tac --resume          # equivale a: teamai claude --resume
 tax                   # Codex a través del grupo de cuentas de TeamAI
 tax resume            # equivale a: teamai codex resume
+tag                   # Grok CLI a través del grupo de cuentas de TeamAI
 teamai claude         # forma larga de tac
 teamai codex          # forma larga de tax
-teamai session        # elige [1] Claude o [2] Codex de forma interactiva
+teamai grok           # forma larga de tag
+teamai session        # elige [1] Claude, [2] Codex o [3] Grok de forma interactiva
 ```
 
 Los nombres evitan deliberadamente reemplazar una función de shell `tc` existente de TeamClaude. `tc` puede seguir apuntando a TeamClaude mientras `tac` y `tax` apuntan a TeamAI.
@@ -149,6 +151,8 @@ teamai import codex
 
 Las versiones recientes de Claude Code pueden guardar las credenciales en el Llavero de macOS en lugar de en `~/.claude/.credentials.json`; en ese caso usa `teamai login`. `import` nunca modifica los archivos originales de TeamClaude, Claude Code ni Codex. TeamAI usa un directorio de Codex aislado y persistente para las sesiones que pasan por el relé, de modo que el `~/.codex` original del usuario queda intacto.
 
+**Grok.** `teamai login grok` ejecuta `grok login` en un `GROK_HOME` desechable, así que cada cuenta tiene su propio inicio de sesión y tu sesión de `~/.grok` no se reemplaza ni se comparte. Solo se puede agrupar el inicio de sesión propio de xAI (`auth.x.ai`); una clave de API o un inicio de sesión SSO de empresa no. `teamai import grok` lee `~/.grok/auth.json` sin modificarlo, pero la cuenta importada pasa a compartir un único token de actualización con tu propio `grok`: el que lo actualice primero puede cerrar la sesión del otro, así que es preferible usar `login` para una cuenta que también usas directamente. Una sesión a través del relé (`tag`) se ejecuta en `$TEAMAI_HOME/grok-home` con el token de cliente del relé como clave de API —tu `config.toml` se copia y `skills`, `installed-plugins` y `hooks` se enlazan, pero ningún inicio de sesión—, de modo que cada solicitud de modelo llega al relé, que la reenvía con una cuenta del grupo. El límite semanal de Grok se lee del mismo endpoint que usa su pantalla `/usage`, lo que no gasta cuota.
+
 ## Operación
 
 ```bash
@@ -202,11 +206,11 @@ cuenta como de costumbre.
 
 **Tickets de reinicio de límite.** Claude puede otorgar a una cuenta tickets de reinicio de límite. La columna `resets` y `teamai accounts` muestran cuántos tiene cada cuenta: `R<n>` reinicia todo el límite semanal y `F<n>` solo la ventana Fable. Se leen de la misma solicitud de uso que el relay ya hace (`?cedar_ember=1`); TeamAI solo los muestra y nunca canjea ninguno: úsalos desde Claude. La columna solo aparece cuando alguna cuenta tiene tickets y la fila todavía cabe en el ancho del terminal. Un recuento que nadie ha vuelto a leer en un día puede estar ya gastado, así que se atenúa (`, stale` en `teamai accounts`). Si el servidor rechaza la solicitud de tickets de una cuenta pero la lectura normal funciona, el relay lee la cuota de esa cuenta de la forma normal y deja de pedirle tickets durante seis horas.
 
-La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente la ventana `7d overall` y la ventana por modelo `7d Fable` (Claude integró su límite de sesión de 5 horas en el semanal en noviembre de 2026, así que la columna `5h session` solo aparece mientras alguna cuenta siga reportando una ventana de 5 horas activa); las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`). Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
+La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene anclada la cuenta seleccionada aunque cambie el uso. Las filas de Claude muestran de forma independiente la ventana `7d overall` y la ventana por modelo `7d Fable` (Claude integró su límite de sesión de 5 horas en el semanal en noviembre de 2026, así que la columna `5h session` solo aparece mientras alguna cuenta siga reportando una ventana de 5 horas activa); las filas de Codex muestran su ventana primaria y secundaria, cada una titulada con el periodo que esa cuenta realmente reporta (`1w limit`); las filas de Grok muestran el límite semanal del plan, la cifra que muestra su pantalla `/usage`. Las cuotas se aprenden de las respuestas del cliente oficial y se conservan entre reinicios.
 
-El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan (`Ultra` (antes Max 20x), `Max 5x`, `Pro`; un nivel que TeamAI no reconoce se muestra con el nombre reportado en lugar de `OAuth`) y, en rojo, los estados de suscripción problemáticos como `past_due`.
+El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex/Grok, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan (`Ultra` (antes Max 20x), `Max 5x`, `Pro`; un nivel que TeamAI no reconoce se muestra con el nombre reportado en lugar de `OAuth`) y, en rojo, los estados de suscripción problemáticos como `past_due`.
 
-`v` abre un menú para mostrar u ocultar: cada sección de cuentas (Claude, Codex), cada indicador (Claude 5h session, 7d overall, 7d Fable, tickets de reinicio; primer y segundo límite de Codex), las columnas de plan, estado, orden, renovación y hora de medición, y el registro de actividad se pueden apagar y volver a encender con Espacio o Enter. La elección se guarda en `config.json` como `display.hidden`, así que se mantiene tras reiniciar y en `teamai capture`; solo cambia lo que se dibuja, nunca el enrutamiento, y el cursor salta las secciones ocultas. En el pie, `s` (fijar al frente) aparece como `pin` y `d` como `del` para dejar sitio a `v`.
+`v` abre un menú para mostrar u ocultar: cada sección de cuentas (Claude, Codex, Grok), cada indicador (Claude 5h session, 7d overall, 7d Fable, tickets de reinicio; primer y segundo límite de Codex; límite semanal de Grok), las columnas de plan, estado, orden, renovación y hora de medición, y el registro de actividad se pueden apagar y volver a encender con Espacio o Enter. La elección se guarda en `config.json` como `display.hidden`, así que se mantiene tras reiniciar y en `teamai capture`; solo cambia lo que se dibuja, nunca el enrutamiento, y el cursor salta las secciones ocultas. En el pie, `s` (fijar al frente) aparece como `pin` y `d` como `del`; cuando las indicaciones no caben en el ancho de la terminal, se quitan las menos necesarias (primero `↑↓ move`), mientras que salir y las teclas de lanzamiento siempre se quedan.
 
 `p` guarda una captura del panel, y `teamai capture` hace lo mismo desde un script o un agente sin necesidad de terminal. Cada captura es un par de archivos bajo `~/.config/teamai/captures/` (o `--out DIR`): el cuadro como texto con sus colores intactos, y el mismo cuadro como PNG dibujado con una fuente de mapa de bits integrada, así que no hace falta nada más que Node. Las direcciones de las cuentas se enmascaran antes de dibujar el cuadro —en la columna de cuentas, en el pie y en el registro de actividad por igual— como `de•••••••••w@gm•••.com` de forma predeterminada; `--redact full` las reemplaza por `account #N`, y `--redact none` las conserva para una captura que se quede en privado. Desde el panel, `p` toma la captura predeterminada y `P` (shift) la de `account #N`; ambas además muestran el PNG en el administrador de archivos y copian la imagen al portapapeles —en macOS sin configurar nada, en Linux si están instalados `xdg-open` y `wl-copy` o `xclip`, y en Windows solo se guardan los archivos— y el pie indica cuáles de esas acciones ocurrieron. La imagen al comienzo de este README es una de esas capturas.
 
@@ -269,7 +273,7 @@ El JSON, abreviado:
 }
 ```
 
-`usage` es una fracción entre 0 y 1. Los nombres de ventana son los que reporta upstream: en Claude `7d` (semanal general), `7d_oi` (semanal del modelo superior) y `5h` mientras exista; en Codex `primary` y `secondary`. `available` significa habilitada, sin error, sin cooldown y por debajo de `switchThreshold`. `inflight` es `null` cuando el informe viene de `state.json`. `resetTickets` es `null` en Codex y en una cuenta de Claude cuyos tickets nunca se han leído; si no, es `{ general, fable, nextExpiry, readAt, stale }`, donde `stale` indica que el recuento tiene más de un día. Las direcciones se enmascaran como en las capturas (`--redact`); los tokens y credenciales nunca forman parte del informe.
+`usage` es una fracción entre 0 y 1. Los nombres de ventana son los que reporta upstream: en Claude `7d` (semanal general), `7d_oi` (semanal del modelo superior) y `5h` mientras exista; en Codex `primary` y `secondary`; en Grok `weekly`. `available` significa habilitada, sin error, sin cooldown y por debajo de `switchThreshold`. `inflight` es `null` cuando el informe viene de `state.json`. `resetTickets` es `null` en Codex y en una cuenta de Claude cuyos tickets nunca se han leído; si no, es `{ general, fable, nextExpiry, readAt, stale }`, donde `stale` indica que el recuento tiene más de un día. Las direcciones se enmascaran como en las capturas (`--redact`); los tokens y credenciales nunca forman parte del informe.
 
 ### El endpoint HTTP
 
@@ -332,6 +336,7 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `proxy.host` | `127.0.0.1` | Dirección de enlace. Solo loopback, por diseño. |
 | `proxy.claudePort` | `3456` | Puerto del relé de Claude. |
 | `proxy.codexPort` | `3457` | Puerto del relé de Codex. |
+| `proxy.grokPort` | `3458` | Puerto del relé de Grok. Opcional; una configuración antigua sin esta clave usa el valor predeterminado. |
 | `proxy.controlPort` | `3556` | Canal de control con el que hablan la TUI y `teamai usage` (`/probe`, `GET /usage`). |
 | `proxy.clientToken` | generado | Token local que debe enviar todo cliente que pase por el relé. |
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |

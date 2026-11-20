@@ -1,13 +1,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loginClaude, loginCodex } from './auth.js';
+import { login } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, DISPLAY_ITEMS, displayOrder, ESC, toggleShown, visibleProviders, type FrameMode } from './frame.js';
 import type { RedactLevel } from './redact.js';
 import { runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
-import type { PersistedState, StoredAccount, TeamAIConfig } from './types.js';
+import type { PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
 
 export async function runTui(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
@@ -68,8 +68,8 @@ export async function runTui(): Promise<void> {
     finally { busy = false; }
   };
 
-  const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
-  const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
+  const add = async (provider: ProviderId): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = await login(provider); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
+  const launch = async (provider: ProviderId): Promise<void> => {
     busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url)); const result = spawnSync(process.execPath, [cli, 'run', provider], { stdio: 'inherit', env: process.env });
     process.stdout.write(`${ESC}?1049h${ESC}?25l`); process.stdin.setRawMode(true); busy = false; message = result.status === 0 ? `${provider} session closed` : `${provider} exited (${result.status ?? 'error'})`;
@@ -80,7 +80,7 @@ export async function runTui(): Promise<void> {
     if (busy) return; message = '';
     if (key === '' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
     if (key === '\x1b') mode = 'normal';
-    else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); }
+    else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); else if (key === '3' || key === 'g') await add('grok'); }
     else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; message = `Deleted ${account.label}`; await restartDaemon(); } mode = 'normal'; } }
     else if (mode === 'view') {
       if (key === '\x1b[A' || key === 'k') viewCursor = Math.max(0, viewCursor - 1);
@@ -96,7 +96,7 @@ export async function runTui(): Promise<void> {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
-      else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
+      else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex'); else if (key === '3' || key === 'G') await launch('grok');
       else if (key === 'o') mode = 'order'; else if (key === 'v') mode = 'view'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 'p') { await capture('partial'); } else if (key === 'P') { await capture('full'); }
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }

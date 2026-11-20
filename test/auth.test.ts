@@ -30,3 +30,19 @@ test('imports the Codex user alongside the workspace so workspace members stay d
   assert.equal(imported?.label, 'b@corp.com');
   assert.equal(imported?.credential.accountId, 'workspace'); assert.equal(imported?.credential.userId, 'user-b');
 });
+
+test('imports the xAI sign-in from a Grok auth.json without modifying it, and skips others', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'teamai-grok-')); const path = join(dir, 'auth.json');
+  const fixture = JSON.stringify({
+    'https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828': { key: 'access-grok', refresh_token: 'refresh-grok', expires_at: '2026-11-20T07:04:11.917164Z', user_id: 'user-1', email: 'g@example.com', auth_mode: 'oidc' },
+    'https://acme.okta.com::client': { key: 'sso-token', user_id: 'sso-user', email: 'corp@example.com' },
+  });
+  await writeFile(path, fixture);
+  const [result, ...rest] = await importAuth('grok', path);
+  assert.equal(rest.length, 0);
+  assert.equal(result!.label, 'g@example.com');
+  assert.deepEqual(result!.credential, { accessToken: 'access-grok', refreshToken: 'refresh-grok', expiresAt: Date.parse('2026-11-20T07:04:11.917Z'), accountId: 'user-1' });
+  assert.equal(await readFile(path, 'utf8'), fixture);
+  await writeFile(path, JSON.stringify({ 'https://acme.okta.com::client': { key: 'k', user_id: 'u' } }));
+  await assert.rejects(importAuth('grok', path), /No Grok sign-in/);
+});

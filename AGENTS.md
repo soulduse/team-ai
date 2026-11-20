@@ -7,9 +7,9 @@ the two seem to differ, and report the discrepancy.
 
 ## What TeamAI is
 
-A local relay that fronts **Claude Code** and the official **Codex CLI** with a
-pool of the user's own subscription accounts, retrying on another account when
-one is out of quota. It is not an API gateway and holds no keys of its own.
+A local relay that fronts **Claude Code**, the official **Codex CLI** and the
+official **Grok CLI** with a pool of the user's own subscription accounts,
+retrying on another account when one is out of quota. It is not an API gateway and holds no keys of its own.
 
 ## Install
 
@@ -55,7 +55,7 @@ Login is interactive and opens a browser. **An agent cannot complete it.** Hand
 this to the user rather than attempting it:
 
 ```bash
-teamai login      # prompts: [1] Claude  [2] Codex
+teamai login      # prompts: [1] Claude  [2] Codex  [3] Grok
 ```
 
 Import is non-interactive, but only works when an exportable credential file
@@ -64,6 +64,7 @@ exists (recent Claude Code versions use the macOS Keychain instead):
 ```bash
 teamai import claude --from ~/.config/teamclaude.json
 teamai import codex
+teamai import grok     # shares ~/.grok's refresh token; prefer login for a pooled account
 ```
 
 `import` never modifies the source files.
@@ -140,7 +141,7 @@ before speculating; a port conflict is the common cause.
 | `src/runtime.ts` | Server lifecycle, warmup timer, profile refresh |
 | `src/account-pool.ts` | Selection order, quota windows, warmup probes |
 | `src/proxy.ts` | Request relaying and retry-on-another-account |
-| `src/providers.ts` | Claude/Codex specifics: headers, quota parsing, refresh |
+| `src/providers.ts` | Claude/Codex/Grok specifics: headers, quota parsing, refresh |
 | `src/frame.ts` | The dashboard as text: display order, gauges, the frame builder both the TUI and capture draw through |
 | `src/tui.ts` | Interactive loop and key handling |
 | `src/usage.ts` | `teamai usage` / `GET /usage`: the quota report as JSON or a table, masked like captures |
@@ -165,10 +166,10 @@ npm run typecheck && npm test && npm run lint && npm run build
 
 - **Do not commit `dist/`.** It is gitignored and built on install.
 - **Do not weaken the loopback bind** or the generated client token.
-- **Do not log, echo, or copy credentials** from `$TEAMAI_HOME`, `~/.claude`, or
-  `~/.codex` into any output, test fixture, or commit.
-- **Do not touch the user's `~/.codex`.** Relayed sessions use an isolated Codex
-  home; keep it that way.
+- **Do not log, echo, or copy credentials** from `$TEAMAI_HOME`, `~/.claude`,
+  `~/.codex` or `~/.grok` into any output, test fixture, or commit.
+- **Do not touch the user's `~/.codex` or `~/.grok`.** Relayed sessions use an
+  isolated Codex home and Grok home; keep it that way.
 - **Do not edit `~/.zshrc` directly.** Use `scripts/install-shell.sh`, which
   backs up and rewrites its marked block.
 - **Keep the README and the code in agreement.** If you change quota ordering,

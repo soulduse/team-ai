@@ -1,4 +1,4 @@
-import type { OAuthCredential, Provider, QuotaSnapshot, QuotaWindow, ResetCredits } from './types.js';
+import type { OAuthCredential, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredits } from './types.js';
 
 // accept-encoding is dropped too: fetch negotiates and decompresses on its own,
 // and echoing the client's preference upstream only invites a compressed body we
@@ -466,4 +466,76 @@ export const codexProvider: Provider = {
   },
 };
 
-export const providers: Record<'claude' | 'codex', Provider> = { claude: claudeProvider, codex: codexProvider };
+// The Grok CLI's public OAuth client (PKCE, no secret) — the key its auth.json
+// files the session under, and what a refresh must name.
+export const GROK_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828';
+const GROK_UPSTREAM = 'https://cli-chat-proxy.grok.com';
+// 429 codes the Grok CLI itself treats as "plan spent" rather than "slow down".
+const GROK_QUOTA_CODES = /^(usage_limit_reached|usage_pool_exhausted|quota_exceeded|insufficient_quota)$/;
+
+// Grok's /v1/billing?format=credits, the read-out behind its /usage screen:
+// one weekly window as a percentage, with the period it belongs to.
+interface GrokBillingPeriod { start?: string | null; end?: string | null }
+export function grokUsageQuota(data: { config?: { creditUsagePercent?: number | null; currentPeriod?: GrokBillingPeriod | null; billingPeriodStart?: string | null; billingPeriodEnd?: string | null } | null }): QuotaSnapshot | null {
+  const config = data.config; const percent = config?.creditUsagePercent;
+  if (typeof percent !== 'number' || !Number.isFinite(percent)) return null;
+  const start = timestamp(config?.currentPeriod?.start ?? config?.billingPeriodStart ?? null);
+  const end = timestamp(config?.currentPeriod?.end ?? config?.billingPeriodEnd ?? null);
+  const usage = Math.max(0, Math.min(1, percent / 100));
+  const minutes = start !== null && end !== null && end > start ? Math.round((end - start) / 60_000) : null;
+  return { routingUsage: usage, routingResetsAt: end, windows: { weekly: { usage, resetsAt: end, minutes } } };
+}
+
+export const grokProvider: Provider = {
+  id: 'grok', label: 'Grok', upstreamBase: GROK_UPSTREAM,
+  // A relayed Grok CLI runs on an API key (the client token), which limits it
+  // to model listing and model calls; nothing else needs an account.
+  normalizePath(path) {
+    const { pathname, search } = new URL(path, 'http://localhost');
+    return ['/v1/responses', '/v1/chat/completions', '/v1/models'].includes(pathname) ? pathname + search : null;
+  },
+  buildHeaders(incoming, account) {
+    const headers = outboundHeaders(incoming);
+    headers.set('authorization', `Bearer ${account.credential.accessToken}`);
+    headers.set('x-xai-token-auth', 'xai-grok-cli');
+    return headers;
+  },
+  rewriteBody(body) { return body; },
+  // The conversation group is fixed for a Grok session; prompt_cache_key backs
+  // it up for a request that carries no header.
+  sessionKey(headers, body) {
+    const fromHeaders = sessionId(headers.get('x-grok-conv-group-id')) ?? sessionId(headers.get('x-grok-session-id'));
+    if (fromHeaders) return fromHeaders;
+    if (body.length === 0) return null;
+    try { return sessionId((JSON.parse(body.toString('utf8')) as Record<string, unknown>).prompt_cache_key); } catch { return null; }
+  },
+  // Responses carry only per-minute x-ratelimit-* figures, not the plan's
+  // weekly limit; that comes from fetchUsage.
+  readQuota() { return null; },
+  classifyFailure(status, headers, body) {
+    if (status === 401) return { kind: 'auth', retryAfterMs: 0 };
+    if (status === 403) return { kind: 'forbidden', retryAfterMs: 30 * 60_000 };
+    if (status === 429) {
+      let codes: string[] = [];
+      try { const parsed = JSON.parse(body); codes = [parsed?.error?.code, parsed?.error?.type, parsed?.code, parsed?.error_type].filter((v): v is string => typeof v === 'string'); } catch { codes = [body.trim()]; }
+      // A spent plan names no retry-after we have seen; an hour keeps the account
+      // benched without re-trying it every minute, and the usage sweep clears it
+      // as soon as the weekly window is read as reset.
+      return codes.some((code) => GROK_QUOTA_CODES.test(code)) ? { kind: 'quota', retryAfterMs: retryAfter(headers, 3_600_000) } : { kind: 'transient', retryAfterMs: retryAfter(headers) };
+    }
+    if (status >= 500) return { kind: 'transient', retryAfterMs: retryAfter(headers, 1_000) };
+    return { kind: 'fatal', retryAfterMs: 0 };
+  },
+  async refresh(credential: OAuthCredential) {
+    if (!credential.refreshToken) throw new Error('No Grok refresh token');
+    const data = await tokenRefresh('https://auth.x.ai/oauth2/token', 'application/x-www-form-urlencoded', new URLSearchParams({ grant_type: 'refresh_token', refresh_token: credential.refreshToken, client_id: GROK_CLIENT_ID }).toString());
+    return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
+  },
+  async fetchUsage(credential) {
+    const response = await fetch(`${GROK_UPSTREAM}/v1/billing?format=credits`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'x-xai-token-auth': 'xai-grok-cli' }, signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error(`Grok usage failed (${response.status})`);
+    return grokUsageQuota(await response.json() as Parameters<typeof grokUsageQuota>[0]);
+  },
+};
+
+export const providers: Record<ProviderId, Provider> = { claude: claudeProvider, codex: codexProvider, grok: grokProvider };
