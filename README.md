@@ -377,6 +377,8 @@ rather than allowed to take the relay down.
 
 Version 0.1 targets subscription OAuth accounts and wrapper-launched CLI sessions. It does not expose a public OpenAI-compatible API, convert Claude requests to Codex requests, support Codex Desktop, or pool credentials between different people. You are responsible for complying with provider terms and policies. Production/commercial API workloads should use the providers' official API billing mechanisms.
 
+**Gemini / Antigravity is not supported, on purpose.** The Antigravity CLI offers no documented way to point its model traffic at another endpoint, keeps its consumer sign-in in the OS keychain (so it cannot be handed over the way Codex and Grok logins are), and Google's Antigravity terms and FAQ forbid reaching Antigravity resources and quotas through third-party tools or proxies — accounts that did so have been suspended throughout 2026. Google's own advice for third-party tools is an AI Studio or Vertex API key, which is pay-as-you-go billing rather than a subscription pool, so it is outside what TeamAI does.
+
 ## Development
 
 ```bash

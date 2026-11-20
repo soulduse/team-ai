@@ -362,6 +362,8 @@ arranque se registra en lugar de dejar que tumbe el relé.
 
 La versión 0.1 apunta a cuentas OAuth de suscripción y a sesiones de CLI lanzadas mediante un wrapper. No expone una API pública compatible con OpenAI, no convierte solicitudes de Claude en solicitudes de Codex, no da soporte a Codex Desktop ni agrupa credenciales de personas distintas. La responsabilidad de cumplir los términos y las políticas de los proveedores es tuya. Las cargas de trabajo de API en producción o con fines comerciales deberían usar los mecanismos oficiales de facturación de API de los proveedores.
 
+**Gemini / Antigravity no está soportado, a propósito.** La CLI de Antigravity no ofrece ninguna forma documentada de enviar sus solicitudes de modelo a otro endpoint, guarda el inicio de sesión de cuentas personales solo en el llavero del sistema (así que no puede traspasarse como los de Codex y Grok), y los términos y la FAQ de Antigravity de Google prohíben acceder a sus recursos y cuotas mediante herramientas de terceros o proxies; a lo largo de 2026 se han suspendido cuentas por hacerlo. Lo que Google recomienda para herramientas de terceros es una clave de API de AI Studio o Vertex, que es facturación por uso y no un grupo de suscripciones, así que queda fuera de lo que hace TeamAI.
+
 ## Desarrollo
 
 ```bash

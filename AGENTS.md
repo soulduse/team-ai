@@ -170,6 +170,9 @@ npm run typecheck && npm test && npm run lint && npm run build
   `~/.codex` or `~/.grok` into any output, test fixture, or commit.
 - **Do not touch the user's `~/.codex` or `~/.grok`.** Relayed sessions use an
   isolated Codex home and Grok home; keep it that way.
+- **Do not add a Gemini / Antigravity provider.** Antigravity's terms forbid
+  proxying its subscription quota and it has no supported endpoint override;
+  see the README's "Scope and compliance".
 - **Do not edit `~/.zshrc` directly.** Use `scripts/install-shell.sh`, which
   backs up and rewrites its marked block.
 - **Keep the README and the code in agreement.** If you change quota ordering,

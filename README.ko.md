@@ -300,6 +300,8 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 
 0.1 버전은 구독 OAuth 계정과 래퍼로 실행하는 CLI 세션을 대상으로 합니다. 공개 OpenAI 호환 API를 제공하지 않고, Claude 요청을 Codex 요청으로 변환하지 않으며, Codex Desktop을 지원하지 않고, 서로 다른 사람의 자격증명을 함께 묶지 않습니다. 제공자의 약관과 정책 준수 책임은 사용자에게 있습니다. 프로덕션·상업용 API 워크로드에는 제공자의 공식 API 과금 체계를 쓰세요.
 
+**Gemini / Antigravity는 의도적으로 지원하지 않습니다.** Antigravity CLI에는 모델 요청을 다른 주소로 보내는 문서화된 방법이 없고, 개인 계정 로그인은 OS 키체인에만 저장되어 Codex·Grok 로그인처럼 넘겨받을 수 없습니다. 또한 Google의 Antigravity 약관과 FAQ는 서드파티 도구나 프록시를 통해 Antigravity 리소스와 할당량에 접근하는 것을 금지하며, 2026년 내내 이를 이유로 한 계정 정지가 보고되었습니다. Google이 서드파티 도구용으로 안내하는 방법은 AI Studio 또는 Vertex API 키인데, 이는 구독 계정 풀이 아니라 사용량 기반 과금이라 TeamAI의 범위 밖입니다.
+
 ## 개발
 
 ```bash
