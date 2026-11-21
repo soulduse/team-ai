@@ -421,3 +421,31 @@ test('a 403 from every account refuses the request without benching the fleet; a
     assert.equal(cooled('a'), true); assert.equal(cooled('b'), false);
   } finally { proxy.close(); upstream.close(); }
 });
+
+test('a 401 whose token refresh cannot reach the server benches the account as retrying, not as needing a re-login', async () => {
+  const upstream = createServer(async (req, res) => {
+    req.resume(); await new Promise<void>((resolve) => req.once('end', resolve));
+    if (req.headers['chatgpt-account-id'] === 'a') { res.writeHead(401, { 'content-type': 'application/json' }); res.end('{}'); }
+    else { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n'); }
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve)); const address = upstream.address(); assert(address && typeof address !== 'string');
+  const provider: Provider = {
+    id: 'codex', label: 'Codex', upstreamBase: `http://127.0.0.1:${address.port}`,
+    normalizePath: () => '/codex/responses', rewriteBody: (body) => body, readQuota: () => null,
+    refresh: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ETIMEDOUT' } }); },
+    buildHeaders(incoming, account) { const result = new Headers(incoming); result.set('chatgpt-account-id', account.id); return result; },
+    classifyFailure(status) { return { kind: status === 401 ? 'auth' : 'fatal', retryAfterMs: 0 }; },
+  };
+  const stored = (id: string, priority: number): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority, credentialId: id, createdAt: '' });
+  const credential = (id: string): OAuthCredential => ({ accessToken: `t-${id}`, refreshToken: 'r', expiresAt: Date.now() + 3_600_000, accountId: id });
+  const pool = new AccountPool(provider, [stored('a', 1), stored('b', 2)], { a: credential('a'), b: credential('b') }, { version: 1, accounts: {} });
+  const events: string[] = [];
+  const proxy = createProxy(pool, 'local-secret', (event) => { if (event) events.push(event); }); await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve)); const proxyAddress = proxy.address(); assert(proxyAddress && typeof proxyAddress !== 'string');
+  try {
+    const response = await fetch(`http://127.0.0.1:${proxyAddress.port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(response.status, 200);
+    const a = pool.accounts.find((x) => x.id === 'a')!;
+    assert.equal(a.errorKind, 'unreachable');
+    assert.ok(events.some((e) => /a auth refresh unreachable; retrying/.test(e)));
+  } finally { proxy.close(); upstream.close(); }
+});

@@ -105,3 +105,13 @@ test('usage report carries Claude reset tickets with their age, and the table na
   assert.match(table, /resets R1 F3(?! \(stale\))/);
   assert.match(table, /resets F2 \(stale\)/);
 });
+
+test('usage report says whether an error heals on its own or needs a re-login', () => {
+  const { config, state } = fixture();
+  state.accounts['cred-a'] = { ...state.accounts['cred-a']!, error: 'token refresh unreachable (ETIMEDOUT); retrying', errorKind: 'unreachable' };
+  const report = buildUsageReport(config, state, { source: 'state', now: NOW });
+  const [alice, bob] = report.providers.claude.accounts;
+  assert.equal(alice!.errorKind, 'unreachable'); assert.equal(bob!.errorKind, 'refused');
+  const table = formatUsageTable(report);
+  assert.match(table, /\[retrying\]/); assert.match(table, /error/);
+});

@@ -159,8 +159,9 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       if (!(lastFailure?.transient && transientAccounts.size && decision.kind !== 'transient')) lastFailure = { response, body: errorBody, transient: decision.kind === 'transient' };
       if (decision.kind === 'auth' && !authRetried) {
         authRetried = true;
-        try { await pool.refresh(account, true); } catch (error) { pool.fail(account, (error as Error).message); excluded.add(account.id); }
-        onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} auth refresh`); continue;
+        let outcome = 'auth refresh';
+        try { await pool.refresh(account, true); } catch (error) { outcome = pool.recordRefreshFailure(account, error) === 'unreachable' ? 'auth refresh unreachable; retrying' : 'auth refresh refused — re-login needed'; excluded.add(account.id); }
+        onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${outcome}`); continue;
       }
       if (decision.kind === 'quota' || decision.kind === 'model-quota') pool.commitProbeFromQuotaRejection(path, incomingHeaders(req), body, response.headers);
       // Only the top model's budget is gone. Benching the account would idle it

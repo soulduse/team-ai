@@ -46,8 +46,9 @@ test('redactor masks an address that is not in config at all', () => {
 
 test('redactSnapshot masks config labels and event messages without touching the originals', () => {
   const config: TeamAIConfig = { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: 'tai-secret' }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [account('alice@example.com'), account('bob@example.com', 'codex')] };
-  const state: PersistedState = { version: 1, accounts: {}, events: [{ at: 0, message: 'Codex POST /v1/responses → bob@example.com 200' }] };
+  const state: PersistedState = { version: 1, accounts: {}, events: [{ at: 0, message: 'Codex POST /v1/responses → bob@example.com 200' }], notices: [{ at: 0, message: 'bob@example.com: token refresh failed: 400 — re-login needed' }] };
   const { config: masked, state: maskedState } = redactSnapshot(config, state, 'partial');
+  assert.equal(maskedState.notices?.[0]?.message.includes('bob@example.com'), false, 'notices are masked like events');
   assert.deepEqual(masked.accounts.map((a) => a.label), ['al••e@ex•••••.com', '•••@ex•••••.com']);
   assert.equal(maskedState.events?.[0]?.message.includes('bob@example.com'), false);
   assert.equal(config.accounts[0]?.label, 'alice@example.com');

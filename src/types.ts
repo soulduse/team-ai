@@ -119,6 +119,10 @@ export interface AccountRuntimeState {
   cooldownUntil: number | null;
   lastUsed: number | null;
   error: string | null;
+  // Why `error` is set, when a token refresh set it: 'unreachable' heals on its
+  // own (the relay retries), 'refused' needs a re-login. Absent in state
+  // written before the two were told apart.
+  errorKind?: RefreshErrorKind | null;
   // When the quota figures above were last read from upstream, by any route
   // (response headers, the usage endpoint, a probe). The dashboard shows their
   // age so a number nobody has re-read does not pass for a live one.
@@ -130,11 +134,28 @@ export interface PersistedState {
   version: 1;
   accounts: Record<string, AccountRuntimeState>;
   events?: Array<{ at: number; message: string }>;
+  // The relay's own notices — token refresh failures and recoveries, adopted
+  // re-logins, fleet changes — kept apart from events, where request lines
+  // would push them out within minutes. Shown by `teamai status`.
+  notices?: Array<{ at: number; message: string }>;
   // The warm-up probe shape learned from live traffic, per provider. Without it
   // a restarted proxy falls back to a hardcoded client version that upstream may
   // reject on version grounds, leaving every account unmeasured until real
   // traffic reseeds the template.
   probes?: Partial<Record<ProviderId, ProbeTemplate>>;
+}
+
+export type RefreshErrorKind = 'unreachable' | 'refused';
+
+// What one token-refresh sweep did: counts for the summary, and a line per
+// account that failed or recovered for the notices.
+export interface RefreshSweep {
+  healed: number;
+  failed: number;
+  unreachable: number;
+  // Another sweep was already running, so this one did nothing.
+  skipped?: boolean;
+  outcomes: Array<{ label: string; kind: RefreshErrorKind | 'healed'; message: string }>;
 }
 
 export interface RuntimeAccount extends StoredAccount {
@@ -147,6 +168,7 @@ export interface RuntimeAccount extends StoredAccount {
   cooldownReason: 'network' | 'quota' | 'forbidden' | null;
   lastUsed: number | null;
   error: string | null;
+  errorKind?: RefreshErrorKind | null;
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
   measuredAt: number | null;

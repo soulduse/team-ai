@@ -151,7 +151,7 @@ Recent Claude Code versions may store credentials in the macOS Keychain rather t
 ## Operations
 
 ```bash
-teamai status                                  # server state + account table
+teamai status                                  # server state + account table + recent notices
 teamai accounts [claude|codex]                 # account table only
 teamai start                                   # start relay, open dashboard
 teamai stop                                    # stop the relay
@@ -212,6 +212,8 @@ The server also warms up on its own every five minutes (`warmupIntervalMs`, 0 to
 
 Idle accounts are kept alive on the same five-minute cycle: any account whose token is expiring or whose last attempt errored is refreshed, one at a time. Ordinary traffic sticks to a few accounts and warm-up deliberately never refreshes, so without this an account no one uses could let its refresh-token chain lapse and be invalidated upstream. The sweep is sequential on purpose — refreshing the whole fleet at once after a long downtime would burst the token endpoint into a rate limit.
 
+A failed refresh is told apart by cause, and the dashboard's `state` column shows which. A token endpoint that did not answer (a timeout, a dropped connection) or said it was overloaded or down (429, 5xx) shows as yellow `retrying`: the token is not dead, the account is only benched, and the relay retries it 30 seconds later, doubling up to 4 minutes, until it answers — no re-login needed. Only a refusal from the token endpoint (a revoked or expired refresh token) shows as red `error`, and that is the case that needs `teamai login`. Each failure and recovery is kept with the account's label in a notice log apart from the request lines, and `teamai status` prints the last ten under the account table.
+
 Learned quota (usage, windows, reset times, subscription profile) is written to disk and restored on the next start, so the dashboard and ranking survive a restart without re-measuring; the probe shape `R` replays is persisted the same way. Per-response signals are not: a cooldown or an error is deliberately dropped on restart, so an account is never re-benched by a stale 429's retry-after — if it really is spent, the next request re-derives the right state.
 
 If more requests arrive at once than the fleet's combined per-account concurrency can serve, the relay rejects the overflow with `429` (`x-teamai-429-reason: concurrency_saturated`) before reading the request body, rather than buffering unbounded bodies. The same header distinguishes a busy fleet from a spent one (`quota_exhausted`) on the "no account available" 429.
@@ -264,7 +266,7 @@ The JSON, abridged:
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
         "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
-        "error": null, "inflight": 0, "available": true
+        "error": null, "errorKind": null, "inflight": 0, "available": true
       }]
     },
     "codex": { "summary": { "…": "…" }, "accounts": [] }
@@ -337,7 +339,8 @@ can see how much room the fleet has, without opening the dashboard.
 
 **Alert when the fleet runs dry.** A cron job or a LaunchAgent can poll the
 summary and send a notification when `available` drops to 0, or list the
-accounts whose `error` is set so you know which ones need `teamai login` again.
+accounts whose `errorKind` is `refused` so you know which ones need `teamai login`
+again (`unreachable` means the relay is retrying on its own).
 
 ## Configuration
 

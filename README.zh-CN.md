@@ -129,7 +129,7 @@ teamai import codex
 ## 运维
 
 ```bash
-teamai status                                  # 服务器状态 + 账号表
+teamai status                                  # 服务器状态 + 账号表 + 最近通知
 teamai accounts [claude|codex]                 # 仅账号表
 teamai start                                   # 启动中继并打开仪表盘
 teamai stop                                    # 停止中继
@@ -167,6 +167,8 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只�
 服务端自身也会每五分钟做一次预热（`warmupIntervalMs`，设为 0 可禁用）：它会清理上游已经重置的配额窗口，并只测量那些尚未测量的账号，因此在一个稳定的账号集群上每个周期几乎不产生任何开销，而窗口一旦轮转就会自动补满，无需任何人去按 `R`。如果某个账号的上游始终不上报配额，在三次徒劳的尝试之后它会被剔除；而每当该窗口重置或你按下 `R`，这份尝试预算就会重新发放。
 
 空闲账号也会在这同一个五分钟周期里被保活：凡是令牌即将过期、或上一次尝试出错的账号，都会被逐个刷新。日常流量往往只集中在少数几个账号上，而预热又刻意从不刷新令牌，所以若没有这一步，一个无人使用的账号就可能让它的 refresh-token 链条失效，进而被上游吊销。这次扫描是刻意串行的——在长时间停机之后一次性刷新整批账号，会把令牌接口打成一波限流。
+
+刷新失败会按原因区分，仪表盘的 `state` 列会显示是哪一种。令牌接口没有响应（超时、连接中断）或返回过载、故障（429、5xx）时显示为黄色 `retrying`：令牌并没有失效，账号只是暂时停用，中继会在 30 秒后重试，并把间隔逐次翻倍、最长 4 分钟，直到接口响应——无需重新登录。只有令牌接口拒绝刷新（refresh token 被吊销或过期）时才显示为红色 `error`，这时才需要 `teamai login`。每次失败与恢复都会连同账号标签记入一份与请求日志分开的通知记录，`teamai status` 会在账号表下方列出最近 10 条。
 
 学习得来的配额（用量、各窗口、重置时间、订阅资料）会写入磁盘并在下次启动时恢复，因此重启后仪表盘和排序无需重新测量即可延续；`R` 重放所用的探测形态也以同样方式持久化。而按响应产生的临时信号则不会：冷却（cooldown）和错误状态会在重启时被有意丢弃，这样账号就不会被某个过期 429 的 retry-after 再次搁置——如果它确实已经用尽，下一个请求会重新推导出正确的状态。
 
@@ -213,7 +215,7 @@ JSON（节选）：
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
         "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
-        "error": null, "inflight": 0, "available": true
+        "error": null, "errorKind": null, "inflight": 0, "available": true
       }]
     },
     "codex": { "summary": { "…": "…" }, "accounts": [] }
@@ -269,7 +271,7 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 
 **告诉智能体。** 在项目的 `CLAUDE.md` 或 `AGENTS.md` 里加一行：“开始长任务或并行任务前，运行 `teamai usage --json` 并检查 `providers.claude.summary.available`”。这样该项目的每个会话不用打开仪表盘也能知道还剩多少余量。
 
-**额度耗尽时提醒。** 用 cron 或 LaunchAgent 定期读取摘要，在 `available` 降到 0 时发通知；列出 `error` 不为空的账号，就能知道哪些需要重新 `teamai login`。
+**额度耗尽时提醒。** 用 cron 或 LaunchAgent 定期读取摘要，在 `available` 降到 0 时发通知；列出 `errorKind` 为 `refused` 的账号，就能知道哪些需要重新 `teamai login`（`unreachable` 表示中继正在自动重试）。
 
 ## 配置
 

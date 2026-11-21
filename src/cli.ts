@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, login } from './auth.js';
 import { captureDashboard } from './capture.js';
-import { resetTicketsNote } from './frame.js';
+import { refreshErrorKind, resetTicketsNote } from './frame.js';
 import { relayedCodexConfig } from './codex-config.js';
 import { launchCommand } from './launch.js';
 import { isRedactLevel } from './redact.js';
@@ -72,8 +72,9 @@ async function selectProvider(promptLabel: string): Promise<ProviderId> {
 
 async function accounts(filter?: ProviderId): Promise<void> {
   const config = await loadConfig(); const state = await loadState();
-  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}${a.fableOnly ? ' (fable only)' : ''}${resetTicketsNote(s?.resetCredits)}`); }
+  for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}${a.fableOnly ? ' (fable only)' : ''}${resetTicketsNote(s?.resetCredits)}${errorNote(s)}`); }
 }
+function errorNote(saved: Parameters<typeof refreshErrorKind>[0]): string { const kind = refreshErrorKind(saved); return kind === 'unreachable' ? '  [retrying: token server unreachable]' : kind ? '  [error: re-login needed]' : ''; }
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
 async function fableOnly(): Promise<void> { const id = provider(args[0]); if (id !== 'claude') throw new Error('fable-only applies to Claude accounts only'); const mode = args.at(-1); const name = args.slice(1, -1).join(' '); if (mode !== 'on' && mode !== 'off') throw new Error('Use on or off'); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.fableOnly = mode === 'on' || undefined; await saveConfig(config); console.log(`Fable only ${mode}: ${account.label} (a running relay picks it up on R in the dashboard or teamai restart)`); }
 async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }
@@ -94,7 +95,12 @@ async function usage(): Promise<void> {
   console.log(args.includes('--json') ? JSON.stringify(report, null, 2) : formatUsageTable(report));
 }
 
-async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); }
+async function status(): Promise<void> {
+  const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts();
+  // Token failures and recoveries, kept apart from request lines so they are still here hours later.
+  const notices = (await loadState()).notices ?? [];
+  if (notices.length) { console.log('\nRecent notices:'); for (const n of notices.slice(-10)) console.log(`  ${new Date(n.at).toLocaleString('en-GB')}  ${n.message}`); }
+}
 // A clean stop drains for up to 5s and saves for up to 2×5s (runtime.ts). The
 // wait used to be 3s, so restart routinely found the old pid still alive,
 // started nothing, and left a server that had already closed its ports. Past

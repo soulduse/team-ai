@@ -2,7 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
-import { PROVIDER_IDS, type DisplayItem, type PersistedState, type ProviderId, type StoredAccount, type ResetCredits, type SubscriptionProfile, type TeamAIConfig } from './types.js';
+import { PROVIDER_IDS, type AccountRuntimeState, type DisplayItem, type PersistedState, type ProviderId, type RefreshErrorKind, type StoredAccount, type ResetCredits, type SubscriptionProfile, type TeamAIConfig } from './types.js';
 import { providerPort } from './storage.js';
 
 // Everything the `v` menu can show or hide, in menu order. The menu, the
@@ -80,6 +80,14 @@ function age(at: number | null | undefined): string {
   const mins = Math.max(0, Math.floor((Date.now() - at) / 60_000));
   const text = mins < 1 ? 'now' : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`;
   return color(mins > 15 ? 33 : 90, text);
+}
+
+// Why an account's error is set: 'unreachable' heals on its own (the relay
+// retries), anything else needs a re-login. State written before errorKind
+// existed is read from the message the sweep left.
+export function refreshErrorKind(saved: Pick<AccountRuntimeState, 'error' | 'errorKind'> | null | undefined): RefreshErrorKind | null {
+  if (!saved?.error) return null;
+  return saved.errorKind ?? (/token refresh unreachable/.test(saved.error) ? 'unreachable' : 'refused');
 }
 
 function healthy(profile: SubscriptionProfile | null | undefined): boolean { return !profile?.status || ['active', 'trialing'].includes(profile.status); }
@@ -269,7 +277,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       : Array.from({ length: codexWindowCount }, (_, index) => index).filter(codexSlotOn).map((index) => slot(spanAt(index))).join('');
     lines.push(color(90, fit(`  ${fit('account', 24)}${headCells('plan', 'state', 'order')}${usageTitles}`, width)));
     for (const account of group) {
-      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
+      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? (refreshErrorKind(saved) === 'unreachable' ? color(33, 'retrying') : color(31, 'error')) : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : provider === 'codex' ? codexPlan(profile) : '—';
       const head = `${cursor} ${fit(account.label, 24)}${headCells(plan, enabled, rank)}`;
       const measured = on('col:age') ? ` ${age(saved?.measuredAt)}` : '';

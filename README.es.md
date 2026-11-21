@@ -156,7 +156,7 @@ Las versiones recientes de Claude Code pueden guardar las credenciales en el Lla
 ## Operación
 
 ```bash
-teamai status                                  # estado del servidor + tabla de cuentas
+teamai status                                  # estado del servidor + tabla de cuentas + avisos recientes
 teamai accounts [claude|codex]                 # solo la tabla de cuentas
 teamai start                                   # inicia el relé y abre el panel
 teamai stop                                    # detiene el relé
@@ -220,6 +220,8 @@ El servidor además hace un calentamiento por su cuenta cada cinco minutos (`war
 
 Las cuentas inactivas se mantienen vivas en el mismo ciclo de cinco minutos: cualquier cuenta cuyo token esté por vencer o cuyo último intento haya dado error se refresca, de a una por vez. El tráfico normal se concentra en unas pocas cuentas y el calentamiento a propósito nunca refresca, así que sin esto una cuenta que nadie usa podría dejar caducar su cadena de refresh-token y que el upstream la invalide. El barrido es secuencial a propósito: refrescar toda la flota de golpe tras una caída prolongada dispararía el endpoint de tokens contra un límite de tasa.
 
+Un refresco fallido se distingue por su causa, y la columna `state` del panel muestra cuál es. Si el endpoint de tokens no respondió (un timeout, una conexión cortada) o avisó de sobrecarga o caída (429, 5xx), aparece `retrying` en amarillo: el token no está muerto, la cuenta solo queda apartada y el relay la reintenta a los 30 segundos, duplicando la espera hasta 4 minutos, hasta que responda — sin volver a iniciar sesión. Solo un rechazo del endpoint de tokens (un refresh token revocado o caducado) aparece como `error` en rojo, y ese es el caso que necesita `teamai login`. Cada fallo y cada recuperación se guardan con la etiqueta de la cuenta en un registro de avisos aparte de las líneas de solicitudes, y `teamai status` muestra los diez últimos bajo la tabla de cuentas.
+
 La cuota aprendida (uso, ventanas, tiempos de reinicio, perfil de suscripción) se escribe en disco y se restaura en el siguiente arranque, de modo que el panel y el orden sobreviven a un reinicio sin volver a medir; la forma de sondeo que reproduce `R` se persiste igual. Las señales por respuesta no: un enfriamiento o un error se descartan a propósito al reiniciar, así una cuenta nunca vuelve a quedar limitada por el retry-after de un 429 obsoleto; si de verdad está agotada, la siguiente solicitud vuelve a deducir el estado correcto.
 
 Si llegan a la vez más solicitudes de las que puede atender la concurrencia combinada por cuenta de la flota, el relé rechaza el excedente con `429` (`x-teamai-429-reason: concurrency_saturated`) antes de leer el cuerpo de la solicitud, en lugar de almacenar cuerpos sin límite. Ese mismo encabezado distingue una flota ocupada de una agotada (`quota_exhausted`) en el 429 de "no hay cuenta disponible".
@@ -265,7 +267,7 @@ El JSON, abreviado:
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
         "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
-        "error": null, "inflight": 0, "available": true
+        "error": null, "errorKind": null, "inflight": 0, "available": true
       }]
     },
     "codex": { "summary": { "…": "…" }, "accounts": [] }
@@ -321,7 +323,7 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 
 **Contárselo a un agente.** Añade una línea al `CLAUDE.md` o `AGENTS.md` de tu proyecto — "Antes de un trabajo largo o en paralelo, ejecuta `teamai usage --json` y revisa `providers.claude.summary.available`" — y cada sesión de ese proyecto sabrá cuánto margen queda sin abrir el panel.
 
-**Avisar cuando se agote.** Un cron o un LaunchAgent puede consultar el resumen y enviar una notificación cuando `available` llegue a 0, o listar las cuentas con `error` para saber cuáles necesitan `teamai login` de nuevo.
+**Avisar cuando se agote.** Un cron o un LaunchAgent puede consultar el resumen y enviar una notificación cuando `available` llegue a 0, o listar las cuentas cuyo `errorKind` sea `refused` para saber cuáles necesitan `teamai login` de nuevo (`unreachable` significa que el relay está reintentando por su cuenta).
 
 ## Configuración
 

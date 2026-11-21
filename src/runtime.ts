@@ -6,7 +6,7 @@ import { createProxy, secureEqual } from './proxy.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, providerPort, readCredentialsText, saveCredentialsIfUnchanged, saveState } from './storage.js';
-import { PROVIDER_IDS, type OAuthCredential, type PersistedState, type ProviderId, type TeamAIConfig } from './types.js';
+import { PROVIDER_IDS, type OAuthCredential, type PersistedState, type ProviderId, type RefreshSweep, type TeamAIConfig } from './types.js';
 import { buildUsageReport, requestUrl, serveUsage } from './usage.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
@@ -17,6 +17,12 @@ const DRAIN_MS = 5_000;
 // later save, and the shutdown that awaits them, indefinitely (2026-10-22).
 const SAVE_TIMEOUT_MS = 30_000;
 const SHUTDOWN_SAVE_MS = 5_000;
+// Retry spacing for a token endpoint that did not answer (see runServer).
+const QUICK_RETRY_MIN_MS = 30_000;
+const QUICK_RETRY_MAX_MS = 4 * 60_000;
+// How many notices state.json keeps, and which relay lines count as one.
+const NOTICE_LIMIT = 100;
+const REFRESH_FAILURE = /auth refresh (unreachable|refused)/;
 
 // Wait for work, but no longer than ms. The work keeps running past the
 // deadline; whoever waits simply stops waiting. Failures are logged, not
@@ -44,7 +50,7 @@ export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
   const pools = PROVIDER_IDS.map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
-  let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200);
+  let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200); const notices = [...(state.notices || [])].slice(-NOTICE_LIMIT);
   // Every save first adopts any credential the TUI wrote since (a re-login),
   // then writes memory back — so a fresh token is picked up within a save
   // interval instead of being overwritten by the stale one it replaced.
@@ -58,18 +64,66 @@ export async function runServer(): Promise<void> {
   const persistNow = async (): Promise<boolean> => {
     const generation = ++saveGeneration; const current = (): boolean => generation === saveGeneration;
     const snapshot = await readCredentialsText(); const updated = (snapshot ? JSON.parse(snapshot) : {}) as Record<string, OAuthCredential>;
-    const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` });
-    const next: PersistedState = { version: 1, accounts: {}, events }; pools.forEach((p) => p.exportState(next)); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential;
+    const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) record(`Adopted ${adopted} re-logged credential(s)`, true);
+    const next: PersistedState = { version: 1, accounts: {}, events, notices }; pools.forEach((p) => p.exportState(next)); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential;
     const [, written] = await Promise.all([saveState(next, async () => current()), saveCredentialsIfUnchanged(updated, snapshot, current)]);
-    if (!written && current()) persist('Credentials changed on disk during a save; saving again');
+    if (!written && current()) persist('Credentials changed on disk during a save; saving again', true);
     return written;
   };
-  const persist = (event?: string): void => { if (event) { events.push({ at: Date.now(), message: event }); if (events.length > 200) events.splice(0, events.length - 200); } if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; saving = saving.then(() => bounded(persistNow(), SAVE_TIMEOUT_MS)); }, 25); };
+  // A notice also goes to `notices`, which request lines never reach, so a
+  // token failure can still be read back (`teamai status`) hours later.
+  const record = (message: string, notice: boolean): void => {
+    const entry = { at: Date.now(), message };
+    events.push(entry); if (events.length > 200) events.splice(0, events.length - 200);
+    if (notice) { notices.push(entry); if (notices.length > NOTICE_LIMIT) notices.splice(0, notices.length - NOTICE_LIMIT); }
+  };
+  const persist = (event?: string, notice = false): void => { if (event) record(event, notice); if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; saving = saving.then(() => bounded(persistNow(), SAVE_TIMEOUT_MS)); }, 25); };
+  // A token endpoint that did not answer is retried sooner than the sweep:
+  // 30s, then doubling to 4 min, back to 30s once it answers. Only accounts
+  // benched that way are retried; a refused token waits for the sweep. Armed
+  // by a sweep that met one and by a request whose 401 refresh did.
+  let quickDelay = QUICK_RETRY_MIN_MS; let quickTimer: NodeJS.Timeout | null = null; let quickDueAt = 0;
+  const armQuickRetry = (): number => {
+    if (quickTimer) return quickDueAt;
+    quickDueAt = Date.now() + quickDelay;
+    quickTimer = setTimeout(() => { quickTimer = null; void retryUnreachable(); }, quickDelay); quickTimer.unref();
+    quickDelay = Math.min(quickDelay * 2, QUICK_RETRY_MAX_MS);
+    return quickDueAt;
+  };
+  // An account's outcome becomes a notice only when it changes, so a long
+  // outage leaves one "unreachable" line per account rather than one per retry
+  // pushing the rest — a refusal that does need a re-login — out of the log.
+  const lastOutcome = new Map<string, string>();
+  const report = (results: RefreshSweep[]): void => {
+    // A sweep that found another one running did nothing and says nothing,
+    // least of all that the network is back.
+    if (results.every((r) => r.skipped)) return;
+    const unreachable = results.reduce((a, r) => a + r.unreachable, 0);
+    if (!unreachable) quickDelay = QUICK_RETRY_MIN_MS;
+    const dueAt = unreachable ? armQuickRetry() : 0;
+    const retryIn = Math.max(1, Math.round((dueAt - Date.now()) / 1000));
+    for (const outcome of results.flatMap((r) => r.outcomes)) {
+      const changed = lastOutcome.get(outcome.label) !== outcome.kind; lastOutcome.set(outcome.label, outcome.kind);
+      const suffix = outcome.kind === 'unreachable' ? ` — retrying in ${retryIn < 60 ? `${retryIn}s` : AccountPool.formatDuration(retryIn * 1000)}` : outcome.kind === 'refused' ? ' — re-login needed' : '';
+      persist(`${outcome.label}: ${outcome.message.replace(/; retrying$/, '')}${suffix}`, changed);
+    }
+    const routine = results.reduce((a, r) => a + r.healed, 0) - results.reduce((a, r) => a + r.outcomes.filter((o) => o.kind === 'healed').length, 0);
+    if (routine) persist(`Refreshed ${routine} lapsing token(s)`);
+    persist();
+  };
+  const retryUnreachable = async (): Promise<void> => report(await Promise.all(pools.map((pool) => pool.refreshLapsed({ onlyUnreachable: true }))));
+  // Request lines stay out of the notices, except a failed token refresh; one
+  // the network swallowed also starts the quick retry.
+  const relayEvent = (event?: string): void => {
+    const refreshFailed = event !== undefined && REFRESH_FAILURE.test(event);
+    if (refreshFailed && event.includes('unreachable')) armQuickRetry();
+    persist(event, refreshFailed);
+  };
   const servers: Server[] = [];
   for (const pool of pools) {
     if (!pool.accounts.length) continue;
     const port = providerPort(config.proxy, pool.provider.id);
-    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity()); servers.push(server);
+    const server = createProxy(pool, config.proxy.clientToken, relayEvent, () => pool.totalCapacity()); servers.push(server);
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
     // Past startup, a socket-level error must never end the process: the relay
     // is the only route its clients have, and killing it over one bad socket
@@ -85,7 +139,7 @@ export async function runServer(): Promise<void> {
     // Failures here are not fatal: a port taken by something else just means
     // that one legacy address is unavailable, not that the proxy cannot serve.
     for (const legacy of legacyPorts(config, pool.provider.id)) {
-      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity());
+      const alias = createProxy(pool, config.proxy.clientToken, relayEvent, () => pool.totalCapacity());
       try {
         await new Promise<void>((resolve, reject) => { alias.once('error', reject); alias.listen(legacy, config.proxy.host, () => { alias.removeListener('error', reject); resolve(); }); });
         servers.push(alias);
@@ -124,14 +178,14 @@ export async function runServer(): Promise<void> {
     setTimeout(() => void runWarmup(), 5_000).unref();
   }
 
-  const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`); };
+  const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`, true); };
   void refreshProfiles(); const profileTimer = setInterval(() => void refreshProfiles(), 6 * 60 * 60_000); profileTimer.unref();
   // Token keep-alive: refresh idle accounts' lapsing tokens so a chain that
   // never rotates does not get invalidated upstream. Runs once now and every
   // five minutes; the sweep itself is sequential to avoid a token-endpoint burst.
   // The sweep always schedules a save, even with nothing to report, so an idle
   // fleet still adopts a re-login (see persistNow) within five minutes.
-  const refreshLapsed = async (): Promise<void> => { const results = await Promise.all(pools.map((pool) => pool.refreshLapsed())); const healed = results.reduce((a, r) => a + r.healed, 0); const failed = results.reduce((a, r) => a + r.failed, 0); const unreachable = results.reduce((a, r) => a + r.unreachable, 0); if (healed) persist(`Refreshed ${healed} lapsed token(s)`); if (failed) persist(`${failed} token refresh(es) failed — re-login needed`); if (unreachable) persist(`${unreachable} token refresh(es) could not reach the server — retrying in 5 min`); if (!healed && !failed && !unreachable) persist(); };
+  const refreshLapsed = async (): Promise<void> => report(await Promise.all(pools.map((pool) => pool.refreshLapsed())));
   setImmediate(() => void refreshLapsed()); const lapsedTimer = setInterval(() => void refreshLapsed(), 5 * 60_000); lapsedTimer.unref();
   // Local control channel: the TUI runs in a separate process, so a fleet-wide
   // quota re-measure (R) has to reach the pools living here. Bound to the proxy
@@ -158,7 +212,7 @@ export async function runServer(): Promise<void> {
     const [latestConfig, latestCredentials] = await Promise.all([loadConfig(), loadCredentials()]);
     const changes = pools.map((p) => p.sync(latestConfig.accounts, latestCredentials)).reduce((a, b) => ({ added: a.added + b.added, removed: a.removed + b.removed }), { added: 0, removed: 0 });
     if (changes.added || changes.removed) {
-      persist(`Fleet updated: ${changes.added} added, ${changes.removed} removed`);
+      persist(`Fleet updated: ${changes.added} added, ${changes.removed} removed`, true);
       // A new account has no profile yet; fill it so its plan renders with its
       // first measurement rather than one refresh cycle later.
       await Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0)));

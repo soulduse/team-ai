@@ -6,9 +6,9 @@
 // account — so a credential can never ride along into the output.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { AccountPool } from './account-pool.js';
-import { resetTickets, resetTicketsStale } from './frame.js';
+import { refreshErrorKind, resetTickets, resetTicketsStale } from './frame.js';
 import { isRedactLevel, maskLabel, redactor, type RedactLevel } from './redact.js';
-import { PROVIDER_IDS, type LiveAccountStatus, type PersistedState, type ProviderId, type TeamAIConfig } from './types.js';
+import { PROVIDER_IDS, type LiveAccountStatus, type PersistedState, type ProviderId, type RefreshErrorKind, type TeamAIConfig } from './types.js';
 
 export interface UsageWindowReport { usage: number | null; resetsAt: string | null; resetsInMs: number | null; minutes?: number | null }
 
@@ -29,6 +29,8 @@ export interface UsageAccountReport {
   cooldownUntil: string | null;
   cooldownReason: string | null;
   error: string | null;
+  // 'unreachable': the relay is retrying on its own. 'refused': re-login needed.
+  errorKind: RefreshErrorKind | null;
   inflight: number | null;
   available: boolean;
 }
@@ -79,7 +81,7 @@ export function buildUsageReport(config: TeamAIConfig, state: PersistedState, op
       plan: saved?.profile?.rateLimitTier ?? null, usage, windows, measuredAt: iso(saved?.measuredAt),
       resetTickets: account.provider === 'claude' && saved?.resetCredits ? { general: saved.resetCredits.general, fable: saved.resetCredits.fable, nextExpiry: iso(saved.resetCredits.nextExpiry), readAt: iso(saved.resetCredits.readAt), stale: resetTicketsStale(saved.resetCredits, now) } : null,
       cooldownUntil: coolingDown ? iso(cooldownUntil) : null, cooldownReason: coolingDown ? status?.cooldownReason ?? null : null,
-      error: error === null ? null : mask(error), inflight: status ? status.inflight : null, available,
+      error: error === null ? null : mask(error), errorKind: refreshErrorKind(saved), inflight: status ? status.inflight : null, available,
     });
     group.summary.accounts++; if (account.enabled) group.summary.enabled++; if (available) group.summary.available++;
   });
@@ -99,7 +101,7 @@ export function formatUsageTable(report: UsageReport): string {
     lines.push('', `${id}: ${group.summary.available}/${group.summary.enabled} available${group.summary.nextResetAt ? `, next reset ${AccountPool.formatDuration(Date.parse(group.summary.nextResetAt) - Date.parse(report.generatedAt))}` : ''}`);
     for (const account of group.accounts) {
       const windows = Object.entries(account.windows).map(([name, w]) => `${name} ${percent(w.usage)}${w.resetsInMs != null ? ` (${AccountPool.formatDuration(w.resetsInMs)})` : ''}`).join('  ');
-      const flags = [!account.enabled ? 'off' : '', account.cooldownUntil ? `cooldown${account.cooldownReason ? `:${account.cooldownReason}` : ''}` : '', account.error ? 'error' : '', account.inflight ? `${account.inflight} in flight` : ''].filter(Boolean).join(', ');
+      const flags = [!account.enabled ? 'off' : '', account.cooldownUntil ? `cooldown${account.cooldownReason ? `:${account.cooldownReason}` : ''}` : '', account.error ? (account.errorKind === 'unreachable' ? 'retrying' : 'error') : '', account.inflight ? `${account.inflight} in flight` : ''].filter(Boolean).join(', ');
       const tickets = resetTickets(account.resetTickets);
       lines.push(`  ${account.available ? '●' : '○'} ${account.label}  ${windows || 'unmeasured'}${tickets ? `  resets ${tickets}${account.resetTickets?.stale ? ' (stale)' : ''}` : ''}${flags ? `  [${flags}]` : ''}`);
     }

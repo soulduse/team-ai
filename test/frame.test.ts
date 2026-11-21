@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFrame, claudeTier, DISPLAY_ITEMS, displayOrder, resetTicketsNote, toggleShown, visibleProviders } from '../src/frame.js';
+import { buildFrame, claudeTier, refreshErrorKind, DISPLAY_ITEMS, displayOrder, resetTicketsNote, toggleShown, visibleProviders } from '../src/frame.js';
 import { defaultConfig } from '../src/storage.js';
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
@@ -192,4 +192,20 @@ test('Grok section: weekly gauge, header counts and ports, and its show/hide ite
   const footer = draw(80).at(-1)!.trimEnd();
   assert.match(footer, /1 Claude {2}2 Codex {2}3 Grok/); assert.match(footer, /q quit$/); assert.ok(!footer.includes('…'));
   assert.match(draw(120).at(-1)!, /3 Grok.*p\/P capture.*v view.*q quit/);
+});
+
+test('a token server that did not answer reads as retrying; a refused token as error', () => {
+  const config: TeamAIConfig = { ...defaultConfig(), accounts: [account('claude', 'net@x.com'), account('claude', 'dead@x.com'), account('claude', 'old@x.com')] };
+  const state = usage({ 'net@x.com': 0.5, 'dead@x.com': 0.5, 'old@x.com': 0.5 });
+  Object.assign(state.accounts['cred-net@x.com']!, { error: 'token refresh unreachable (ETIMEDOUT); retrying', errorKind: 'unreachable' });
+  Object.assign(state.accounts['cred-dead@x.com']!, { error: 'token refresh failed: OAuth refresh failed (400)', errorKind: 'refused' });
+  // Written before errorKind existed: read from the message.
+  Object.assign(state.accounts['cred-old@x.com']!, { error: 'token refresh unreachable (ECONNRESET); retrying' });
+  const lines = buildFrame(config, state, { width: 140, selectedId: null, mode: 'normal', message: '', sortByHeadroom: false });
+  const row = (label: string): string => lines.find((line) => plain(line).includes(label))!;
+  assert.match(plain(row('net@x.com')), /retrying/);
+  assert.match(plain(row('dead@x.com')), / error /);
+  assert.match(plain(row('old@x.com')), /retrying/);
+  assert.equal(refreshErrorKind({ error: null }), null);
+  assert.equal(refreshErrorKind({ error: 'Claude profile failed (401)' }), 'refused');
 });

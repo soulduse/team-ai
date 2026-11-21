@@ -220,8 +220,10 @@ test('refreshLapsed refreshes errored and expiring accounts, skips healthy ones'
   const pool = new AccountPool(p, [account('err'), account('soon'), account('healthy'), account('notoken')],
     { 'codex:err': cred('err', now + 60 * 60_000), 'codex:soon': cred('soon', now + 60_000), 'codex:healthy': cred('healthy', now + 60 * 60_000), 'codex:notoken': { accessToken: 't', refreshToken: null, expiresAt: now + 60_000, accountId: 'notoken' } }, state);
   pool.accounts.find((a) => a.id === 'err')!.error = 'boom';
-  const count = await pool.refreshLapsed();
-  assert.deepEqual(count, { healed: 2, failed: 0, unreachable: 0 });
+  const sweep = await pool.refreshLapsed();
+  assert.deepEqual({ ...sweep, outcomes: undefined }, { healed: 2, failed: 0, unreachable: 0, outcomes: undefined });
+  // Only the errored account's recovery is named; the routine renewal is just counted.
+  assert.deepEqual(sweep.outcomes, [{ label: 'err', kind: 'healed', message: 'token refreshed' }]);
   assert.deepEqual(refreshed.sort(), ['err', 'soon']); // healthy skipped; notoken has no refresh token
 });
 
@@ -407,8 +409,11 @@ test('the lapsed-token sweep reports only real renewals and benches a token that
   const flaky: Provider = { ...provider, refresh: async (c) => { if (c.accountId === 'b') throw new Error('invalid_grant'); return { ...c, accessToken: 'renewed', expiresAt: Date.now() + 3_600_000 }; } };
   const expired = (id: string) => ({ ...credential(id), expiresAt: Date.now() - 1 });
   const pool = new AccountPool(flaky, [account('a'), account('b')], { 'codex:a': expired('a'), 'codex:b': expired('b') }, state);
-  assert.deepEqual(await pool.refreshLapsed(), { healed: 1, failed: 1, unreachable: 0 });
+  const sweep = await pool.refreshLapsed();
+  assert.deepEqual([sweep.healed, sweep.failed, sweep.unreachable], [1, 1, 0]);
   const a = pool.accounts.find((x) => x.id === 'a')!; const b = pool.accounts.find((x) => x.id === 'b')!;
+  assert.equal(b.errorKind, 'refused', 'a refusal is what needs a re-login');
+  assert.deepEqual(sweep.outcomes.map((o) => [o.label, o.kind]), [['b', 'refused']]);
   assert.equal(a.credential.accessToken, 'renewed'); assert.equal(a.error, null);
   assert.match(b.error!, /token refresh failed: invalid_grant/);
   assert.equal(pool.acquire('s')?.id, 'a', 'the account with a dead token is not routed to');
@@ -490,9 +495,11 @@ test('a token endpoint the network cannot reach is retried, not reported as need
   // fetch's own shape for "no response at all": a TypeError with the socket error on cause.
   const offline: Provider = { ...provider, refresh: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ETIMEDOUT' } }); } };
   const pool = new AccountPool(offline, [account('a')], { 'codex:a': { ...credential('a'), expiresAt: Date.now() - 1 } }, state);
-  assert.deepEqual(await pool.refreshLapsed(), { healed: 0, failed: 0, unreachable: 1 });
+  const sweep = await pool.refreshLapsed();
+  assert.deepEqual([sweep.healed, sweep.failed, sweep.unreachable], [0, 0, 1]);
   const a = pool.accounts[0]!;
   assert.match(a.error!, /unreachable \(ETIMEDOUT\); retrying/);
+  assert.equal(a.errorKind, 'unreachable');
   assert.equal(pool.acquire('s'), null, 'an expired token still cannot serve while the network is down');
 });
 
@@ -633,4 +640,53 @@ test('a usage read that lost the race to proxied headers still keeps the tickets
   await pool.refreshUsage(0);
   assert.equal(pool.accounts[0]!.usage, 0.1); // the newer header reading stands
   assert.deepEqual(pool.accounts[0]!.resetCredits, tickets);
+});
+
+test('the quick retry renews only accounts the token endpoint did not answer for, and clears the kind on success', async () => {
+  const tried: string[] = []; let online = false;
+  const p: Provider = { ...provider, refresh: async (c) => {
+    tried.push(c.accountId!);
+    if (c.accountId === 'dead') throw Object.assign(new Error('OAuth refresh failed (400)'), { status: 400 });
+    if (c.accountId === 'soon') return c; // renewed but still near expiry: due again for the regular sweep
+    if (!online) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ETIMEDOUT' } });
+    return { ...c, accessToken: 'renewed', expiresAt: Date.now() + 3_600_000 };
+  } };
+  const expired = (id: string) => ({ ...credential(id), expiresAt: Date.now() - 1 });
+  const pool = new AccountPool(p, [account('net'), account('dead'), account('soon')], { 'codex:net': expired('net'), 'codex:dead': expired('dead'), 'codex:soon': { ...credential('soon'), expiresAt: Date.now() + 60_000 } }, state);
+  await pool.refreshLapsed();
+  const net = pool.accounts.find((a) => a.id === 'net')!; const dead = pool.accounts.find((a) => a.id === 'dead')!;
+  assert.equal(net.errorKind, 'unreachable'); assert.equal(dead.errorKind, 'refused');
+  tried.length = 0; online = true;
+  const sweep = await pool.refreshLapsed({ onlyUnreachable: true });
+  assert.deepEqual(tried, ['net'], 'a refused token and a merely expiring one wait for the regular sweep');
+  assert.deepEqual(sweep.outcomes, [{ label: 'net', kind: 'healed', message: 'token refreshed' }]);
+  assert.equal(net.error, null); assert.equal(net.errorKind, null);
+  assert.equal(dead.errorKind, 'refused');
+});
+
+test('the error kind is exported with the state', async () => {
+  const p: Provider = { ...provider, refresh: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }); } };
+  const pool = new AccountPool(p, [account('a')], { 'codex:a': { ...credential('a'), expiresAt: Date.now() - 1 } }, state);
+  await pool.refreshLapsed();
+  const output: PersistedState = { version: 1, accounts: {} }; pool.exportState(output);
+  assert.equal(output.accounts['codex:a']!.errorKind, 'unreachable');
+});
+
+test('a token endpoint that is overloaded or down (429, 5xx) is retried; only a 4xx refusal needs a re-login', async () => {
+  const statusOf: Record<string, number> = { busy: 429, down: 503, dead: 400 };
+  const p: Provider = { ...provider, refresh: async (c) => { throw Object.assign(new Error(`OAuth refresh failed (${statusOf[c.accountId!]})`), { status: statusOf[c.accountId!] }); } };
+  const expired = (id: string) => ({ ...credential(id), expiresAt: Date.now() - 1 });
+  const pool = new AccountPool(p, [account('busy'), account('down'), account('dead')], { 'codex:busy': expired('busy'), 'codex:down': expired('down'), 'codex:dead': expired('dead') }, state);
+  const sweep = await pool.refreshLapsed();
+  assert.deepEqual([sweep.unreachable, sweep.failed], [2, 1]);
+  assert.deepEqual(pool.accounts.map((a) => a.errorKind), ['unreachable', 'unreachable', 'refused']);
+});
+
+test('a sweep that finds another running reports itself as skipped', async () => {
+  let release: () => void = () => {};
+  const p: Provider = { ...provider, refresh: async (c) => { await new Promise<void>((r) => { release = r; }); return c; } };
+  const pool = new AccountPool(p, [account('a')], { 'codex:a': { ...credential('a'), expiresAt: Date.now() - 1 } }, state);
+  const first = pool.refreshLapsed();
+  assert.equal((await pool.refreshLapsed({ onlyUnreachable: true })).skipped, true);
+  release(); assert.equal((await first).skipped, undefined);
 });

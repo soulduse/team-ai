@@ -1,4 +1,4 @@
-import type { LiveAccountStatus, OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import type { LiveAccountStatus, OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, RefreshErrorKind, RefreshSweep, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
 // An empty exclusion set, for judging an account on its own merits rather than
 // on what one request has already tried.
@@ -7,7 +7,12 @@ const NO_EXCLUSIONS = new Set<string>();
 // fetch rejects with a TypeError when no response arrived at all (DNS, connect,
 // reset) and with a TimeoutError when its signal timed out; an HTTP refusal
 // is an ordinary Error thrown by the provider after reading the status.
-function isUnreachable(error: unknown): boolean { const e = error as { name?: string } | null; return error instanceof TypeError || e?.name === 'TimeoutError' || e?.name === 'AbortError'; }
+// No verdict on the token: the endpoint never answered, or answered that it
+// is overloaded or down (429, 5xx). Only a 4xx refusal says the token is dead.
+function isUnreachable(error: unknown): boolean {
+  const e = error as { name?: string; status?: number } | null;
+  return error instanceof TypeError || e?.name === 'TimeoutError' || e?.name === 'AbortError' || e?.status === 429 || (e?.status ?? 0) >= 500;
+}
 function networkCause(error: unknown): string { const e = error as { message?: string; cause?: { code?: string } } | null; return e?.cause?.code || e?.message || String(error); }
 
 export class AccountPool {
@@ -40,7 +45,7 @@ export class AccountPool {
       // retry-after came back to park seven accounts across restarts. If the
       // account really is spent, the next request re-derives the right cooldown
       // (model-quota → Fable only, real quota → whole account).
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, resetCredits: saved?.resetCredits ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, resetCredits: saved?.resetCredits ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, errorKind: null, inflight: 0 };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -372,13 +377,26 @@ export class AccountPool {
     const name = Object.keys(account.windows).find((n) => /^7d_[a-z0-9]+$/i.test(n)) ?? '7d_oi';
     account.windows = { ...account.windows, [name]: { usage: 1, resetsAt } };
   }
-  fail(account: RuntimeAccount, message: string): void { account.error = message; }
+  private static clearError(account: RuntimeAccount): void { account.error = null; account.errorKind = null; }
+
+  // A token refresh that did not go through, recorded with why. A token
+  // endpoint that never answered (a timeout, a dropped connection) is not a
+  // dead token: the account is benched while the relay retries on its own, and
+  // only a refusal is reported as needing a re-login. The dashboard draws the
+  // two apart — `retrying` and `error` — because both used to read as `error`
+  // and a network blip had the user re-logging for nothing (2026-11-21).
+  recordRefreshFailure(account: RuntimeAccount, error: unknown): RefreshErrorKind {
+    const kind: RefreshErrorKind = isUnreachable(error) ? 'unreachable' : 'refused';
+    account.error = kind === 'unreachable' ? `token refresh unreachable (${networkCause(error)}); retrying` : `token refresh failed: ${(error as Error).message}`;
+    account.errorKind = kind;
+    return kind;
+  }
 
   async refresh(account: RuntimeAccount, force = false): Promise<void> {
     if (!force && account.credential.expiresAt && account.credential.expiresAt > Date.now() + 5 * 60_000) return;
     const existing = this.refreshes.get(account.id);
     if (existing) return existing;
-    const promise = this.provider.refresh(account.credential).then((next) => { account.credential = next; account.error = null; }).finally(() => this.refreshes.delete(account.id));
+    const promise = this.provider.refresh(account.credential).then((next) => { account.credential = next; AccountPool.clearError(account); }).finally(() => this.refreshes.delete(account.id));
     this.refreshes.set(account.id, promise);
     return promise;
   }
@@ -393,14 +411,19 @@ export class AccountPool {
   // Sequential on purpose: after a long downtime the whole fleet can be due at
   // once, and firing every refresh together would burst the token endpoint into
   // a rate limit that errors accounts that were merely idle. One at a time.
-  async refreshLapsed(): Promise<{ healed: number; failed: number; unreachable: number }> {
-    if (this.sweepInFlight) return { healed: 0, failed: 0, unreachable: 0 };
+  //
+  // `onlyUnreachable` narrows the sweep to accounts benched by a token endpoint
+  // that did not answer: the relay retries those sooner than the five-minute
+  // sweep, and a refused token must not be re-tried that often.
+  async refreshLapsed(options: { onlyUnreachable?: boolean } = {}): Promise<RefreshSweep> {
+    if (this.sweepInFlight) return { healed: 0, failed: 0, unreachable: 0, skipped: true, outcomes: [] };
     this.sweepInFlight = true;
     try {
       const now = Date.now();
-      const due = this.accounts.filter((a) => a.credential.refreshToken
-        && (a.error !== null || a.credential.expiresAt === null || a.credential.expiresAt < now + 5 * 60_000));
-      let healed = 0; let failed = 0; let unreachable = 0;
+      const due = this.accounts.filter((a) => a.credential.refreshToken && (options.onlyUnreachable
+        ? a.errorKind === 'unreachable'
+        : a.error !== null || a.credential.expiresAt === null || a.credential.expiresAt < now + 5 * 60_000));
+      const sweep: RefreshSweep = { healed: 0, failed: 0, unreachable: 0, outcomes: [] };
       for (const account of due) {
         // Force when the account errored or its expiry is unknown: refresh()'s
         // own gate skips a token that still looks valid, but an errored account
@@ -412,18 +435,24 @@ export class AccountPool {
         // expired for a day, showing as active the whole time. An account whose
         // token cannot be renewed cannot serve, so it is benched here until a
         // later sweep — or a re-login adopted by adoptCredentials — heals it.
-        try { await this.refresh(account, account.error !== null || account.credential.expiresAt === null); healed++; }
+        const wasError = account.error !== null;
+        try {
+          await this.refresh(account, wasError || account.credential.expiresAt === null); sweep.healed++;
+          // Only a recovery is worth naming; a routine renewal is counted.
+          if (wasError) sweep.outcomes.push({ label: account.label, kind: 'healed', message: 'token refreshed' });
+        }
         //
         // A refusal and an unreachable token endpoint are told apart: both bench
         // the account, but only a refusal needs a re-login. On 2026-10-22 a
         // network outage was reported as "re-login needed", the user re-logged
         // for nothing, and the next sweep would have healed it on its own.
         catch (error) {
-          if (isUnreachable(error)) { unreachable++; account.error = `token refresh unreachable (${networkCause(error)}); retrying`; }
-          else { failed++; account.error = `token refresh failed: ${(error as Error).message}`; }
+          const kind = this.recordRefreshFailure(account, error);
+          if (kind === 'unreachable') sweep.unreachable++; else sweep.failed++;
+          sweep.outcomes.push({ label: account.label, kind, message: account.error! });
         }
       }
-      return { healed, failed, unreachable };
+      return sweep;
     } finally {
       this.sweepInFlight = false;
     }
@@ -556,7 +585,7 @@ export class AccountPool {
         next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority, fableOnly: account.fableOnly }));
       } else {
         added++;
-        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, errorKind: null, inflight: 0 });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
@@ -647,7 +676,7 @@ export class AccountPool {
       // reported as unmeasured instead of inflating the M/N the TUI shows.
       const quota = this.provider.readQuota(response.headers, text);
       if (quota) this.applyQuota(account, quota);
-      if (response.ok) { account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownReason = null; }
+      if (response.ok) { AccountPool.clearError(account); account.cooldownUntil = null; account.cooldownReason = null; }
       // A rejection that only names the model-weekly window says the account is
       // spent for the top model, not unusable: an ordinary probe (the default
       // model) still succeeds here. Clearing the bench on that reading is what
@@ -655,7 +684,7 @@ export class AccountPool {
       // cooldown it was given was the weekly retry-after, which no other model
       // has to wait for.
       else if (!modelOverride && this.provider.classifyFailure(response.status, response.headers, text).kind === 'model-quota') {
-        account.error = null; account.cooldownUntil = null; account.cooldownReason = null;
+        AccountPool.clearError(account); account.cooldownUntil = null; account.cooldownReason = null;
       }
       return quota !== null;
     } catch { return false; }
@@ -676,7 +705,7 @@ export class AccountPool {
       const fresh = latest[account.credentialId];
       if (!fresh || fresh.expiresAt === null || fresh.accessToken === account.credential.accessToken) continue;
       if (account.credential.expiresAt !== null && fresh.expiresAt <= account.credential.expiresAt) continue;
-      account.credential = fresh; account.error = null; adopted++;
+      account.credential = fresh; AccountPool.clearError(account); adopted++;
     }
     return adopted;
   }
@@ -705,7 +734,7 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, resetCredits: a.resetCredits ?? null, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
+    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, resetCredits: a.resetCredits ?? null, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, errorKind: a.errorKind };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
   }
 }
