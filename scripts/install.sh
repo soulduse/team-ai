@@ -58,7 +58,7 @@ if [ -f package-lock.json ]; then run npm ci || run npm install; else run npm in
 step "Building"
 run npm run build
 
-step "Linking commands (teamai, tai, tac, tax)"
+step "Linking commands (teamai, tai, tac, tax, tag)"
 # npm link writes into a global prefix that may need elevation; say so plainly
 # rather than dying with a raw EACCES.
 if ! run npm link; then

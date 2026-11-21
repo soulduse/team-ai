@@ -4,7 +4,7 @@
 // frame builder — so a script can take a capture as easily as a keypress can.
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { buildFrame, displayOrder, type FrameMode } from './frame.js';
+import { buildFrame, displayOrder, visibleProviders, type FrameMode } from './frame.js';
 import { renderFrame } from './png.js';
 import { redactSnapshot, redactor, type RedactLevel } from './redact.js';
 import { dataDir, loadConfig, loadState } from './storage.js';
@@ -33,7 +33,7 @@ export async function captureDashboard(options: CaptureOptions): Promise<Capture
   const { config, state } = redactSnapshot(rawConfig, rawState, options.level);
   const sortByHeadroom = options.sortByHeadroom ?? true;
   const width = Math.max(80, options.width ?? 120);
-  const selectedId = options.selectedId ?? displayOrder(config.accounts, state, sortByHeadroom)[0]?.credentialId ?? null;
+  const selectedId = options.selectedId ?? displayOrder(config.accounts, state, sortByHeadroom, visibleProviders(config))[0]?.credentialId ?? null;
   // The footer message may name an account ("Added …"), so it goes through
   // the same mask as everything else.
   const message = redactor(rawConfig.accounts, options.level)(options.message ?? '');

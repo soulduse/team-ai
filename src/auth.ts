@@ -15,7 +15,7 @@ function decodeJwt(token: string): Record<string, unknown> { try { const part = 
 function stringAt(value: unknown, key: string): string | null { return value && typeof value === 'object' && typeof (value as Record<string, unknown>)[key] === 'string' ? (value as Record<string, string>)[key]! : null; }
 
 export async function importAuth(provider: ProviderId, from?: string): Promise<Array<{ label: string; credential: OAuthCredential }>> {
-  const path = expand(from || (provider === 'claude' ? '~/.claude/.credentials.json' : join(process.env.CODEX_HOME || '~/.codex', 'auth.json')));
+  const path = expand(from || (provider === 'claude' ? '~/.claude/.credentials.json' : provider === 'grok' ? join(process.env.GROK_HOME || '~/.grok', 'auth.json') : join(process.env.CODEX_HOME || '~/.codex', 'auth.json')));
   let contents: string;
   try { contents = await readFile(path, 'utf8'); }
   catch (error) {
@@ -23,6 +23,7 @@ export async function importAuth(provider: ProviderId, from?: string): Promise<A
     throw error;
   }
   const raw = JSON.parse(contents) as Record<string, unknown>;
+  if (provider === 'grok') return grokAccounts(raw);
   if (provider === 'claude') {
     if (Array.isArray(raw.accounts)) {
       const accounts = raw.accounts.flatMap((entry) => {
@@ -47,6 +48,20 @@ export async function importAuth(provider: ProviderId, from?: string): Promise<A
   const exp = decodeJwt(tokens.access_token).exp;
   const userId = codexUserId(tokens.access_token, typeof tokens.id_token === 'string' ? tokens.id_token : undefined);
   return [{ label: stringAt(idClaims, 'email') || accountId, credential: { accessToken: tokens.access_token, refreshToken: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : null, expiresAt: typeof exp === 'number' ? exp * 1000 : null, accountId, ...(userId ? { userId } : {}) } }];
+}
+
+// Grok's auth.json keys each session as `<issuer>::<client id>`; only xAI's
+// own sign-in (auth.x.ai) is a subscription account the relay can use.
+export function grokAccounts(raw: Record<string, unknown>): Array<{ label: string; credential: OAuthCredential }> {
+  const accounts = Object.entries(raw).flatMap(([key, value]) => {
+    if (!key.startsWith('https://auth.x.ai::') || !value || typeof value !== 'object') return [];
+    const access = stringAt(value, 'key'); const userId = stringAt(value, 'user_id');
+    if (!access || !userId) return [];
+    const expires = Date.parse(stringAt(value, 'expires_at') ?? '');
+    return [{ label: stringAt(value, 'email') || userId, credential: { accessToken: access, refreshToken: stringAt(value, 'refresh_token'), expiresAt: Number.isFinite(expires) ? expires : null, accountId: userId } }];
+  });
+  if (!accounts.length) throw new Error('No Grok sign-in found in auth.json (an API key or SSO login cannot be pooled)');
+  return accounts;
 }
 
 // The ChatGPT user a Codex token belongs to. The access token is read first so
@@ -112,6 +127,17 @@ export async function loginClaude(): Promise<{ label: string; credential: OAuthC
   return { label: profile.label, credential: { accessToken, refreshToken: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : null, expiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000, accountId: profile.id, ...(profile.organizationId ? { organizationId: profile.organizationId } : {}) } };
 }
 
+// `grok login` in a throwaway GROK_HOME, so the user's own ~/.grok session is
+// neither replaced nor shared: the account gets a sign-in of its own.
+export async function loginGrok(): Promise<{ label: string; credential: OAuthCredential }> {
+  const home = await mkdtemp(join(tmpdir(), 'teamai-grok-login-'));
+  try {
+    const exit = await new Promise<number>((resolveExit, reject) => { const launch = launchCommand('grok', ['login']); const child = spawn(launch.file, launch.args, { stdio: 'inherit', windowsVerbatimArguments: launch.windowsVerbatimArguments, env: { ...process.env, GROK_HOME: home } }); child.once('error', reject); child.once('exit', (code) => resolveExit(code ?? 1)); });
+    if (exit !== 0) throw new Error(`grok login exited with ${exit}`);
+    return (await importAuth('grok', join(home, 'auth.json')))[0]!;
+  } finally { await rm(home, { recursive: true, force: true }); }
+}
+
 export async function loginCodex(): Promise<{ label: string; credential: OAuthCredential }> {
   const home = await mkdtemp(join(tmpdir(), 'teamai-codex-login-'));
   try {
@@ -121,3 +147,7 @@ export async function loginCodex(): Promise<{ label: string; credential: OAuthCr
   } finally { await rm(home, { recursive: true, force: true }); }
 }
 
+// Interactive sign-in for any provider; the dashboard and `teamai login` share it.
+export function login(id: ProviderId): Promise<{ label: string; credential: OAuthCredential }> {
+  return id === 'claude' ? loginClaude() : id === 'codex' ? loginCodex() : loginGrok();
+}

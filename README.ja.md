@@ -2,20 +2,20 @@
 
 [English](README.md) · [한국어](README.ko.md) · **日本語** · [中文](README.zh-CN.md) · [Español](README.es.md)
 
-TeamAI は **Claude Code** と公式 **Codex CLI** のためのローカル多アカウントリレーです。プロバイダーごとに独立したアカウントプールを保持し、選ばれたサブスクリプションが利用できない、またはクォータを使い切っている場合は別のアカウントでリクエストを再試行します。
+TeamAI は **Claude Code**、公式 **Codex CLI**、公式 **Grok CLI** のためのローカル多アカウントリレーです。プロバイダーごとに独立したアカウントプールを保持し、選ばれたサブスクリプションが利用できない、またはクォータを使い切っている場合は別のアカウントでリクエストを再試行します。
 
 ![TeamAIダッシュボード](docs/dashboard.png)
 
 <sub>上のダッシュボードは <code>teamai capture --redact full</code> で作った実際のキャプチャです。実際のクォータとアクティビティログで、アカウントのアドレスは含まれていません。</sub>
 
-> TeamAI は独立したオープンソースプロジェクトです。Anthropic、OpenAI、および無関係なサービスである teamai.com とは一切関係ありません。
+> TeamAI は独立したオープンソースプロジェクトです。Anthropic、OpenAI、xAI、および無関係なサービスである teamai.com とは一切関係ありません。
 
 ## 必要環境
 
 - Node.js 20 以上
 - macOS、Linux、または Windows
 - `claude` および／または `codex` を別途インストール済みであること
-- ご自身の Claude Pro/Max/Ultra または ChatGPT Codex のサブスクリプションアカウント
+- ご自身の Claude Pro/Max/Ultra、ChatGPT Codex または SuperGrok のサブスクリプションアカウント
 
 ## インストール
 
@@ -46,7 +46,7 @@ teamai login
 tai
 ```
 
-`login` は `[1] Claude` と `[2] Codex` のどちらを追加するかを尋ねます。アカウントを追加するには繰り返し実行してください。`tai` は短いセッションコマンドで、`teamai start` と同等です。ローカルリレーを起動してダッシュボードを開きます。TUI で `1` を押すと Claude Code が、`2` を押すと Codex が起動します。クライアントを終了するとダッシュボードに戻ります。
+`login` は `[1] Claude`、`[2] Codex`、`[3] Grok` のどれを追加するかを尋ねます。アカウントを追加するには繰り返し実行してください。`tai` は短いセッションコマンドで、`teamai start` と同等です。ローカルリレーを起動してダッシュボードを開きます。TUI で `1` を押すと Claude Code が、`2` を押すと Codex が、`3` を押すと Grok が起動します。クライアントを終了するとダッシュボードに戻ります。
 
 特定のプロバイダーで直接セッションを開始するには、専用のランチャーを使います。必要に応じて TeamAI リレーを自動的に起動し、後続の引数はすべて公式クライアントにそのまま渡します。
 
@@ -55,9 +55,11 @@ tac                   # TeamAI のアカウントプール経由の Claude Code
 tac --resume          # teamai claude --resume と同じ
 tax                   # TeamAI のアカウントプール経由の Codex
 tax resume            # teamai codex resume と同じ
+tag                   # TeamAI のアカウントプール経由の Grok CLI
 teamai claude         # tac の長い形式
 teamai codex          # tax の長い形式
-teamai session        # [1] Claude か [2] Codex を対話的に選択
+teamai grok           # tag の長い形式
+teamai session        # [1] Claude、[2] Codex、[3] Grok を対話的に選択
 ```
 
 これらの名前は、既存の TeamClaude の `tc` シェル関数を置き換えないよう意図的に選ばれています。`tc` は引き続き TeamClaude を、`tac` と `tax` は TeamAI を対象にできます。
@@ -122,6 +124,8 @@ teamai import codex
 
 最近のバージョンの Claude Code は、資格情報を `~/.claude/.credentials.json` ではなく macOS キーチェーンに保存することがあります。その場合は `teamai login` を使ってください。`import` は元の TeamClaude、Claude Code、Codex のファイルを一切変更しません。TeamAI はリレーされるセッション用に隔離された永続的な Codex ホームを使うため、ユーザー本来の `~/.codex` はそのまま残ります。
 
+**Grok.** `teamai login grok` は使い捨ての `GROK_HOME` で `grok login` を実行するため、アカウントごとに独立したサインインが得られ、ご自身の `~/.grok` のセッションが置き換えられたり共有されたりすることはありません。プールに入れられるのは xAI 自身のサインイン（`auth.x.ai`）だけで、API キーや企業の SSO ログインは入れられません。`teamai import grok` は `~/.grok/auth.json` を変更せずに読み込みますが、インポートしたアカウントはご自身の `grok` と 1 つのリフレッシュトークンを共有することになります。先に更新した側がもう一方をサインアウトさせることがあるため、直接も使うアカウントには `login` を使うことをおすすめします。リレーされるセッション（`tag`）は `$TEAMAI_HOME/grok-home` で、リレーのクライアントトークンを API キーとして実行されます。`config.toml` はコピーされ、`skills`・`installed-plugins`・`hooks` はリンクされますが、サインイン情報は引き継がれません。そのため、すべてのモデルリクエストはリレーに届き、リレーがプールのアカウントで送り出します。Grok の週間制限は `/usage` 画面と同じエンドポイントから読み取るため、クォータを消費しません。
+
 ## 運用
 
 ```bash
@@ -148,9 +152,13 @@ Fable ティアの 429（共有の `7d` ウィンドウはまだ許可されて�
 
 **Fable 専用アカウント.** 既定ではすべてのアカウントで無効です。`teamai fable-only claude <アカウント> on` で Claude アカウントを 1 つ Fable 専用にします。そのアカウントのモデル別週次（Fable）ウィンドウに予算が残っている間は、すべての Fable リクエストが他のどのアカウント（固定優先度を含む）よりも先にそこへ送られ、他のモデル（Opus、Sonnet、Haiku）のリクエストは送られません（リレー自身のバックグラウンドのクォータ計測のみ例外）。Fable の枠は最大で週次上限の半分なので、そのウィンドウを使い切ると残りの週次枠が遊んでしまいます。そのため以降は Fable が他のアカウントへ流れ、Fable 専用アカウントは他のモデルを通常どおり処理します。予約中はダッシュボードの状態が `fable` と表示されます。実行中のリレーはダッシュボードの `R` または `teamai restart` で変更を反映します。
 
-フルスクリーンの TUI は Claude と Codex のアカウントをグループ分けし、使用量が変化しても現在選択中のアカウントを固定したままにします。Claude の行は `7d overall` とモデル単位の `7d Fable` の各ウィンドウを個別に表示します（Claude は 2026 年 11 月に 5 時間のセッション制限を週間制限へ統合したため、`5h session` 列は有効な 5 時間ウィンドウを報告するアカウントがある間だけ表示されます）。Codex の行は主・副のウィンドウを表示し、それぞれにそのアカウントが実際に報告した期間（`1w limit`）を見出しとして付けます。クォータは公式クライアントの応答から学習され、再起動後も保持されます。
+**上限リセットチケット.** Claude はアカウントに上限リセットチケットを付与することがあります。`resets` 列と `teamai accounts` に各アカウントの保有数を表示します: `R<n>` は週次上限全体、`F<n>` は Fable ウィンドウのみをリセットします。リレーが既に送っている使用量リクエスト（`?cedar_ember=1`）から読み取り、TeamAI は表示するだけでチケットを使いません — 使用は Claude 側で行ってください。この列はチケットを持つアカウントがあり、行が端末幅に収まるときだけ表示されます。1 日以上読み直せていない数はすでに使われている可能性があるため薄く表示します（`teamai accounts` では `, stale`）。あるアカウントでチケットのリクエストだけが拒否され通常の読み取りは通る場合、そのアカウントは通常の方法でクォータだけを読み、6 時間はチケットを問い合わせません。
 
-フッターは TeamClaude と同じアカウントワークフローを提供します。Claude/Codex の起動、選択、切り替え、有効化／無効化、並び替え、削除、追加／ログイン、再計測（`R`）、終了です。`switch` は選択したアカウントをそのプロバイダーのプールの先頭にピン留めします。並び替えモードでは順位を割り当てたり、アカウントを自動スケジューリングに戻したりできます。Claude のプロフィールを更新すると、プランのティア（`Ultra`（旧 Max 20x）、`Max 5x`、`Pro`。TeamAI が知らないティアは `OAuth` ではなく報告された名前のまま）と `past_due` のような不健全なサブスクリプション状態が赤色で表示されます。
+フルスクリーンの TUI は Claude と Codex のアカウントをグループ分けし、使用量が変化しても現在選択中のアカウントを固定したままにします。Claude の行は `7d overall` とモデル単位の `7d Fable` の各ウィンドウを個別に表示します（Claude は 2026 年 11 月に 5 時間のセッション制限を週間制限へ統合したため、`5h session` 列は有効な 5 時間ウィンドウを報告するアカウントがある間だけ表示されます）。Codex の行は主・副のウィンドウを表示し、それぞれにそのアカウントが実際に報告した期間（`1w limit`）を見出しとして付けます。Grok の行はプランの週間制限（`/usage` 画面に表示される値）を表示します。クォータは公式クライアントの応答から学習され、再起動後も保持されます。
+
+フッターは TeamClaude と同じアカウントワークフローを提供します。Claude/Codex/Grok の起動、選択、切り替え、有効化／無効化、並び替え、削除、追加／ログイン、再計測（`R`）、終了です。`switch` は選択したアカウントをそのプロバイダーのプールの先頭にピン留めします。並び替えモードでは順位を割り当てたり、アカウントを自動スケジューリングに戻したりできます。Claude のプロフィールを更新すると、プランのティア（`Ultra`（旧 Max 20x）、`Max 5x`、`Pro`。TeamAI が知らないティアは `OAuth` ではなく報告された名前のまま）と `past_due` のような不健全なサブスクリプション状態が赤色で表示されます。
+
+`v` で表示設定メニューが開きます。アカウントセクション（Claude、Codex、Grok）、各ゲージ（Claude の 5h session・7d overall・7d Fable・リセットチケット、Codex の第 1・第 2 リミット、Grok の週間リミット）、plan・state・order・更新日・計測時刻の列、Activity ログを Space または Enter でオン／オフできます。選択は `config.json` の `display.hidden` に保存され、再起動後や `teamai capture` でも維持されます。変わるのは表示だけでルーティングには影響せず、非表示のセクションにはカーソルが移動しません。フッターでは `s`（先頭に固定）を `pin`、`d` を `del` と短く表示します。ヒントが端末の幅に収まらないときは、必要性の低いもの（まず `↑↓ move`）から省きますが、終了と起動のキーは常に残ります。
 
 `p` はダッシュボードをキャプチャして保存し、`teamai capture` は端末なしでスクリプトやエージェントから同じことを行います。キャプチャは `~/.config/teamai/captures/`（または `--out DIR`）配下にファイル一組として残ります。色をそのまま保ったテキストのフレームと、内蔵のビットマップフォントで描いた同じフレームの PNG で、Node 以外に必要なものはありません。アカウントのアドレスはフレームを描く前にマスクされるため、アカウント列・フッター・アクティビティログのどこにも残りません。既定は `de•••••••••w@gm•••.com` 形式の部分マスクで、`--redact full` は `account #N` に置き換え、`--redact none` は自分だけで見るキャプチャのためにアドレスをそのまま残します。ダッシュボードでは `p` が既定のマスク、`P`（shift）が `account #N` でのキャプチャで、どちらも保存に加えてファイルマネージャーでその PNG を選択した状態で開き、画像をクリップボードにコピーします。macOS ではそのまま動作し、Linux では `xdg-open` と `wl-copy` または `xclip` があれば動作し、Windows ではファイルの保存だけを行い、どちらの動作も行いません。実際にどれが行われたかはフッターに表示されます。この README 冒頭の画像もそのようにして作ったキャプチャです。
 
@@ -204,7 +212,7 @@ JSON（一部省略）：
         "plan": "default_claude_max_20x", "usage": 0.05,
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
-        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
         "error": null, "inflight": 0, "available": true
       }]
     },
@@ -213,7 +221,7 @@ JSON（一部省略）：
 }
 ```
 
-`usage` は 0〜1 の割合です。ウィンドウ名はアップストリームが報告するままで、Claude は `7d`（全体の週次）、`7d_oi`（最上位モデルの週次）、残っている間の `5h`、Codex は `primary`・`secondary` です。`available` は有効・エラーなし・クールダウン中でない・`switchThreshold` 未満を意味します。`state.json` から作ったレポートでは `inflight` は `null` です。アカウントのアドレスはキャプチャと同じ方式で伏せられ（`--redact`）、トークンや認証情報がレポートに含まれることはありません。
+`usage` は 0〜1 の割合です。ウィンドウ名はアップストリームが報告するままで、Claude は `7d`（全体の週次）、`7d_oi`（最上位モデルの週次）、残っている間の `5h`、Codex は `primary`・`secondary`、Grok は `weekly` です。`available` は有効・エラーなし・クールダウン中でない・`switchThreshold` 未満を意味します。`state.json` から作ったレポートでは `inflight` は `null` です。`resetTickets` は Codex アカウントと、チケットを一度も読めていない Claude アカウントでは `null`、それ以外は `{ general, fable, nextExpiry, readAt, stale }` で、`stale` はその数が 1 日以上前の値であることを示します。アカウントのアドレスはキャプチャと同じ方式で伏せられ（`--redact`）、トークンや認証情報がレポートに含まれることはありません。
 
 ### HTTP エンドポイント
 
@@ -274,12 +282,14 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 | `proxy.host` | `127.0.0.1` | バインドアドレス。設計上ループバック専用です。 |
 | `proxy.claudePort` | `3456` | Claude リレーのポート。 |
 | `proxy.codexPort` | `3457` | Codex リレーのポート。 |
+| `proxy.grokPort` | `3458` | Grok リレーのポート。任意で、このキーがない古い設定ではデフォルト値が使われます。 |
 | `proxy.controlPort` | `3556` | TUI と `teamai usage` が通信する制御チャネル（`/probe`、`GET /usage`）。 |
 | `proxy.clientToken` | 自動生成 | リレーされるすべてのクライアントが送る必要のあるローカルトークン。 |
 | `switchThreshold` | `0.98` | この使用率を超えたアカウントは選択されなくなります。 |
 | `warmupIntervalMs` | `300000` | バックグラウンド再計測の間隔。`0` で無効化。 |
 | `maxConcurrentPerAccount` | `16` | 1 アカウントあたりに許可される同時実行リクエスト数。`0` で無制限。 |
 | `fableReserveThreshold` | `0.8` | この値以上に Fable ウィンドウを消費したアカウントを非 Fable リクエストに優先します。`1` でモデル対応ルーティングを無効化。 |
+| `display.hidden` | — | 任意。`v` メニューでオフにしたダッシュボード項目。例: `["section:codex", "activity"]`。表示専用。 |
 | `proxy.legacyPorts` | — | 任意。プロバイダーごとに応答を継続する追加ポート。例: `{ "claude": [3400] }`。 |
 
 他のプロセスがすでにポートを占有している場合は変更してください。起動失敗のよくある原因であり、その理由は `server-start.log` に記録されます。
@@ -289,6 +299,8 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 ## 適用範囲とコンプライアンス
 
 バージョン 0.1 は、サブスクリプションの OAuth アカウントと、ラッパー経由で起動される CLI セッションを対象としています。公開の OpenAI 互換 API は提供せず、Claude のリクエストを Codex のリクエストに変換することも、Codex Desktop をサポートすることも、異なる人物の資格情報をプールすることもありません。プロバイダーの規約とポリシーを遵守する責任は利用者にあります。本番用・商用の API ワークロードには、各プロバイダーの公式な API 課金の仕組みを使ってください。
+
+**Gemini / Antigravity は意図的にサポートしていません。** どのプロバイダーの規約も、複数のサブスクリプションアカウントを切り替えて利用上限を回避することを通常の利用の範囲外としていますが、実際に執行しているのは Google です。Antigravity の FAQ は「アカウントローテーションの自動化」を個人プランでは非対応と明記し、規約はサードパーティソフトウェア経由で Antigravity にアクセスすることを停止の理由としており、Antigravity や Gemini CLI のログインをまとめて使うオープンソースツールでは 2026 年を通じてアカウントが一斉に停止されたという報告が続いています(再違反は永久停止)。さらに Antigravity CLI には文書化されたエンドポイント変更の方法がなく、個人アカウントのサインインは OS のキーチェーンにのみ保存されるため、まとめて使うには TeamAI が Google のトークンを自ら保持するしかありません。Google がサードパーティツール向けに案内しているのは AI Studio または Vertex の API キーですが、これはサブスクリプションのプールではなく従量課金であり、TeamAI の対象外です。
 
 ## 開発
 

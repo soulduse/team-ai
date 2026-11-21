@@ -46,6 +46,15 @@ const PALETTE: Record<number, Rgb> = {
   90: [128, 134, 146], 91: [230, 130, 130], 92: [196, 206, 120], 93: [232, 204, 130], 94: [140, 180, 230], 95: [210, 150, 210], 96: [140, 215, 210], 97: [236, 238, 242],
 };
 
+// The xterm 256-color table: 0-15 the base palette, 16-231 a 6×6×6 cube,
+// 232-255 a gray ramp.
+function xterm256(n: number): Rgb {
+  if (n < 8) return PALETTE[30 + n] ?? FOREGROUND;
+  if (n < 16) return PALETTE[82 + n] ?? FOREGROUND;
+  if (n < 232) { const step = (v: number): number => (v ? 55 + v * 40 : 0); const c = n - 16; return [step(Math.floor(c / 36)), step(Math.floor(c / 6) % 6), step(c % 6)]; }
+  const gray = 8 + (n - 232) * 10; return [gray, gray, gray];
+}
+
 interface Cell { glyph: string; fg: Rgb; bg: Rgb | null }
 
 const SGR = new RegExp(`${String.fromCharCode(27)}\\[([0-9;]*)m`, 'g');
@@ -58,8 +67,16 @@ function parseLine(line: string): Cell[] {
   const emit = (text: string): void => { for (const glyph of text) cells.push({ glyph, fg: bold && fg === FOREGROUND ? PALETTE[97]! : fg, bg }); };
   for (const match of line.matchAll(SGR)) {
     emit(line.slice(last, match.index)); last = match.index + match[0].length;
-    for (const code of (match[1] || '0').split(';').map(Number)) {
-      if (code === 0) { fg = FOREGROUND; bg = null; bold = false; }
+    const codes = (match[1] || '0').split(';').map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i]!;
+      // 38/48 take an extended color: ;2;r;g;b (24-bit) or ;5;n (256-color).
+      if ((code === 38 || code === 48) && (codes[i + 1] === 2 || codes[i + 1] === 5)) {
+        const rgb: Rgb = codes[i + 1] === 2 ? [codes[i + 2] ?? 0, codes[i + 3] ?? 0, codes[i + 4] ?? 0] : xterm256(codes[i + 2] ?? 0);
+        i += codes[i + 1] === 2 ? 4 : 2;
+        if (code === 38) fg = rgb; else bg = rgb;
+      }
+      else if (code === 0) { fg = FOREGROUND; bg = null; bold = false; }
       else if (code === 1) bold = true;
       else if (code === 39) fg = FOREGROUND;
       else if (code === 49) bg = null;

@@ -1,4 +1,14 @@
-export type ProviderId = 'claude' | 'codex';
+// Every provider the relay fronts, in display order.
+export const PROVIDER_IDS = ['claude', 'codex', 'grok'] as const;
+export type ProviderId = typeof PROVIDER_IDS[number];
+
+// A part of the dashboard the user can hide from the `v` menu. Only hidden
+// items are stored, so anything added later shows up by default.
+export type DisplayItem =
+  | 'section:claude' | 'section:codex' | 'section:grok'
+  | 'gauge:5h' | 'gauge:7d' | 'gauge:fable' | 'gauge:resets' | 'gauge:codex-1' | 'gauge:codex-2' | 'gauge:grok'
+  | 'col:plan' | 'col:state' | 'col:order' | 'col:renewal' | 'col:age'
+  | 'activity';
 
 export interface StoredAccount {
   id: string;
@@ -33,6 +43,8 @@ export interface TeamAIConfig {
   version: 1;
   proxy: {
     host: string; claudePort: number; codexPort: number; controlPort?: number; clientToken: string;
+    // Optional so configs written before Grok support keep loading; see providerPort().
+    grokPort?: number;
     // Extra ports to keep answering on, per provider. Clients receive their base
     // URL at startup and cannot be redirected afterwards, so a port change would
     // otherwise strand every open session; listing the old port here keeps those
@@ -48,6 +60,8 @@ export interface TeamAIConfig {
   // is not consumed by Opus/Sonnet requests that any account could serve.
   // 1 disables the split and restores plain least-spent routing.
   fableReserveThreshold?: number;
+  // Dashboard parts the user switched off; display only, routing ignores it.
+  display?: { hidden?: DisplayItem[] };
   accounts: StoredAccount[];
 }
 
@@ -72,6 +86,19 @@ export interface QuotaSnapshot {
   routingUsage: number | null;
   routingResetsAt: number | null;
   windows: Record<string, QuotaWindow>;
+  // Limit-reset tickets the account holds (Claude `cedar_ember` grants); absent
+  // when the response did not carry them, so an older reading is kept.
+  resetCredits?: ResetCredits | null;
+}
+
+// Counts only: TeamAI shows the tickets, it never redeems one.
+export interface ResetCredits {
+  general: number; // clears the whole weekly limit
+  fable: number; // clears the model-scoped (Fable) weekly window only
+  nextExpiry: number | null; // soonest expiry among the counted tickets
+  // When the counts were read. A response that stops carrying tickets keeps the
+  // last counts, so a reader judges their age by this (missing = unknown age).
+  readAt?: number;
 }
 
 export interface SubscriptionProfile {
@@ -96,6 +123,7 @@ export interface AccountRuntimeState {
   // (response headers, the usage endpoint, a probe). The dashboard shows their
   // age so a number nobody has re-read does not pass for a live one.
   measuredAt?: number | null;
+  resetCredits?: ResetCredits | null;
 }
 
 export interface PersistedState {
@@ -122,6 +150,7 @@ export interface RuntimeAccount extends StoredAccount {
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
   measuredAt: number | null;
+  resetCredits?: ResetCredits | null;
   inflight: number;
 }
 
@@ -167,7 +196,8 @@ export interface Provider {
   // The subscription's own usage read-out — what the client's /usage (Claude)
   // or /status (Codex) screen shows. Unlike a probe it is not a model call, so
   // it spends no quota and can run on a timer across the whole fleet.
-  fetchUsage?(credential: OAuthCredential): Promise<QuotaSnapshot | null>;
+  // userAgent: the live client's, when the relay has seen one (Claude asks for it).
+  fetchUsage?(credential: OAuthCredential, userAgent?: string | null): Promise<QuotaSnapshot | null>;
 }
 
 // Why the pool could not hand out an account, shaped for the 429 the client

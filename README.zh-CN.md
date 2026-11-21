@@ -2,20 +2,20 @@
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · **中文** · [Español](README.es.md)
 
-TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
+TeamAI 是面向 **Claude Code**、官方 **Codex CLI** 和官方 **Grok CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
 
 ![TeamAI 仪表盘](docs/dashboard.png)
 
 <sub>上方的仪表盘是用 <code>teamai capture --redact full</code> 得到的真实截取：真实的配额与活动日志，没有账号地址。</sub>
 
-> TeamAI 是一个独立的开源项目，与 Anthropic、OpenAI 以及与之无关的 teamai.com 服务均无任何关联。
+> TeamAI 是一个独立的开源项目，与 Anthropic、OpenAI、xAI 以及与之无关的 teamai.com 服务均无任何关联。
 
 ## 环境要求
 
 - Node.js 20 及以上
 - macOS、Linux 或 Windows
 - 单独安装的 `claude` 和／或 `codex`
-- 你自己的 Claude Pro/Max/Ultra 或 ChatGPT Codex 订阅账号
+- 你自己的 Claude Pro/Max/Ultra、ChatGPT Codex 或 SuperGrok 订阅账号
 
 ## 安装
 
@@ -46,7 +46,7 @@ teamai login
 tai
 ```
 
-`login` 会询问要添加 `[1] Claude` 还是 `[2] Codex`。要添加更多账号，重复执行即可。`tai` 是简写的会话命令，等价于 `teamai start`：启动本地中继并打开仪表盘。在 TUI 中按 `1` 启动 Claude Code，按 `2` 启动 Codex。客户端退出后会回到仪表盘。
+`login` 会询问要添加 `[1] Claude`、`[2] Codex` 还是 `[3] Grok`。要添加更多账号，重复执行即可。`tai` 是简写的会话命令，等价于 `teamai start`：启动本地中继并打开仪表盘。在 TUI 中按 `1` 启动 Claude Code，按 `2` 启动 Codex，按 `3` 启动 Grok。客户端退出后会回到仪表盘。
 
 若想直接开启某个服务商的会话，请使用专用启动命令。它们会在必要时自动拉起 TeamAI 中继，并把后面跟的所有参数原样传给官方客户端：
 
@@ -55,9 +55,11 @@ tac                   # 经由 TeamAI 账号池的 Claude Code
 tac --resume          # 等同于：teamai claude --resume
 tax                   # 经由 TeamAI 账号池的 Codex
 tax resume            # 等同于：teamai codex resume
+tag                   # 经由 TeamAI 账号池的 Grok CLI
 teamai claude         # tac 的完整写法
 teamai codex          # tax 的完整写法
-teamai session        # 交互式选择 [1] Claude 或 [2] Codex
+teamai grok           # tag 的完整写法
+teamai session        # 交互式选择 [1] Claude、[2] Codex 或 [3] Grok
 ```
 
 这些名称是有意取的，以免覆盖已有的 TeamClaude `tc` shell 函数。`tc` 可以继续指向 TeamClaude，而 `tac` 和 `tax` 指向 TeamAI。
@@ -122,6 +124,8 @@ teamai import codex
 
 较新版本的 Claude Code 可能把凭据存放在 macOS 钥匙串而不是 `~/.claude/.credentials.json` 中；这种情况下请改用 `teamai login`。`import` 绝不会修改原有的 TeamClaude、Claude Code 或 Codex 文件。TeamAI 为中继会话使用一个持久化的隔离 Codex 主目录，因此用户原本的 `~/.codex` 保持原样。
 
+**Grok.** `teamai login grok` 会在一个临时的 `GROK_HOME` 中运行 `grok login`，因此每个账号都有各自独立的登录，你的 `~/.grok` 会话既不会被替换，也不会被共享。只有 xAI 自己的登录（`auth.x.ai`）可以加入账号池；API 密钥或公司 SSO 登录不行。`teamai import grok` 会读取 `~/.grok/auth.json` 而不修改它，但导入的账号随后会与你自己的 `grok` 共用同一个刷新令牌：谁先刷新，谁就可能把另一方登出，所以对于你也会直接使用的账号，最好用 `login` 添加。中继会话（`tag`）在 `$TEAMAI_HOME/grok-home` 中运行，并以中继的客户端令牌作为 API 密钥——你的 `config.toml` 会被复制进去，`skills`、`installed-plugins` 和 `hooks` 会被链接，但登录信息不会——因此每个模型请求都会到达中继，再由中继用账号池中的账号转发出去。Grok 的每周限额读取自其 `/usage` 界面所用的同一个端点，不消耗配额。
+
 ## 运维
 
 ```bash
@@ -148,9 +152,13 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `7d` 窗口仍为允许）只�
 
 **Fable 专用账号。** 默认对所有账号关闭。`teamai fable-only claude <账号> on` 把一个 Claude 账号设为 Fable 专用。只要该账号的按模型周（Fable）窗口还有额度，所有 Fable 请求都会先发往它——优先于其他任何账号，包括固定优先级——且不会把其他模型（Opus、Sonnet、Haiku）的请求路由给它（只有中继自身的后台额度探测例外）。Fable 额度最多为周上限的一半，窗口用完后该账号剩余的周额度就会闲置，所以此后 Fable 会转到其他账号，而 Fable 专用账号像普通账号一样处理其他模型。保留期间仪表盘状态显示为 `fable`。正在运行的中继会在仪表盘按 `R` 或执行 `teamai restart` 后生效。
 
-全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `7d overall` 以及按模型划分的 `7d Fable` 窗口（Claude 已于 2026 年 11 月把 5 小时会话限额并入每周限额，因此只有当某个账号仍上报有效的 5 小时窗口时才会出现 `5h session` 列）；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
+**限额重置券。** Claude 可能会给账号发放限额重置券。`resets` 列和 `teamai accounts` 显示每个账号持有的数量：`R<n>` 重置整个周限额，`F<n>` 只重置 Fable 窗口。数据来自中继已经发送的用量请求（`?cedar_ember=1`）；TeamAI 只显示、从不使用重置券——请在 Claude 中自行使用。只有当某个账号持有重置券且该行仍能放进终端宽度时才显示此列。超过一天未重新读取的数量可能已被使用，因此会变暗显示（`teamai accounts` 中标为 `, stale`）。如果某个账号的重置券请求被拒绝而普通读取正常，中继会对该账号按普通方式只读取额度，并在六小时内不再为它请求重置券。
 
-底栏提供与 TeamClaude 相同的账号操作流程：启动 Claude/Codex、选择、切换、启用／禁用、排序、删除、添加／登录、重新测量（`R`）以及退出。`switch` 会把选中的账号固定到其所属服务商账号池的最前面；排序模式下可以指定名次，也可以把某个账号交回自动调度。刷新 Claude 资料时会显示套餐等级（`Ultra`（原 Max 20x）、`Max 5x`、`Pro`；TeamAI 不认识的等级按上报的名称显示，而不是 `OAuth`），并以红色标出 `past_due` 这类异常的订阅状态。
+全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `7d overall` 以及按模型划分的 `7d Fable` 窗口（Claude 已于 2026 年 11 月把 5 小时会话限额并入每周限额，因此只有当某个账号仍上报有效的 5 小时窗口时才会出现 `5h session` 列）；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）；Grok 行显示套餐的每周限额，即其 `/usage` 界面显示的数值。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
+
+底栏提供与 TeamClaude 相同的账号操作流程：启动 Claude/Codex/Grok、选择、切换、启用／禁用、排序、删除、添加／登录、重新测量（`R`）以及退出。`switch` 会把选中的账号固定到其所属服务商账号池的最前面；排序模式下可以指定名次，也可以把某个账号交回自动调度。刷新 Claude 资料时会显示套餐等级（`Ultra`（原 Max 20x）、`Max 5x`、`Pro`；TeamAI 不认识的等级按上报的名称显示，而不是 `OAuth`），并以红色标出 `past_due` 这类异常的订阅状态。
+
+按 `v` 打开显示设置菜单：账号分区（Claude、Codex、Grok）、各个仪表（Claude 的 5h session、7d overall、7d Fable、重置券；Codex 的第一、第二限额；Grok 的每周限额）、plan／state／order／续费日／测量时间列以及 Activity 日志，都可以用空格或回车开关。选择保存在 `config.json` 的 `display.hidden` 中，重启后和 `teamai capture` 里同样生效；它只改变显示内容，不影响路由，光标也会跳过隐藏的分区。底栏把 `s`（置顶固定）简写为 `pin`，`d` 简写为 `del`；当提示宽度超过终端时，会先去掉最不常用的提示（首先是 `↑↓ move`），而退出键和启动键始终保留。
 
 `p` 会把仪表盘截取并保存，`teamai capture` 则可以在没有终端的情况下从脚本或代理完成同样的事。每次截取会在 `~/.config/teamai/captures/`（或 `--out DIR`）下留下一对文件：保留原有颜色的文本帧，以及用内置位图字体绘制的同一帧 PNG，除 Node 之外不需要任何东西。账号地址在绘制帧之前就已被遮盖，因此账号列、页脚和活动日志中都不会残留。默认是 `de•••••••••w@gm•••.com` 这样的部分遮盖；`--redact full` 会替换为 `account #N`；`--redact none` 则保留地址，用于只给自己看的截取。在仪表盘中，`p` 使用默认遮盖，`P`（shift）则以 `account #N` 截取；两者除了保存之外，还会在文件管理器中定位到该 PNG，并把图片复制到剪贴板——macOS 上开箱即用，Linux 上需要安装 `xdg-open` 以及 `wl-copy` 或 `xclip`；Windows 上只保存文件，这两步都不会执行。页脚会说明哪些操作实际完成了。本 README 顶部的图片就是这样得到的一次截取。
 
@@ -204,7 +212,7 @@ JSON（节选）：
         "plan": "default_claude_max_20x", "usage": 0.05,
         "windows": { "7d": { "usage": 0.05, "resetsAt": "…", "resetsInMs": 579600000 },
                      "7d_oi": { "usage": 0.08, "resetsAt": "…", "resetsInMs": 579600000 } },
-        "measuredAt": "…", "cooldownUntil": null, "cooldownReason": null,
+        "measuredAt": "…", "resetTickets": null, "cooldownUntil": null, "cooldownReason": null,
         "error": null, "inflight": 0, "available": true
       }]
     },
@@ -213,7 +221,7 @@ JSON（节选）：
 }
 ```
 
-`usage` 是 0 到 1 之间的比例。窗口名称与上游报告的一致：Claude 为 `7d`（总体周额度）、`7d_oi`（顶级模型周额度），以及仍存在时的 `5h`；Codex 为 `primary` 和 `secondary`。`available` 表示已启用、无错误、未在冷却且低于 `switchThreshold`。报告来自 `state.json` 时 `inflight` 为 `null`。账号地址的遮蔽方式与截图相同（`--redact`），令牌和凭据永远不会出现在报告中。
+`usage` 是 0 到 1 之间的比例。窗口名称与上游报告的一致：Claude 为 `7d`（总体周额度）、`7d_oi`（顶级模型周额度），以及仍存在时的 `5h`；Codex 为 `primary` 和 `secondary`；Grok 为 `weekly`。`available` 表示已启用、无错误、未在冷却且低于 `switchThreshold`。报告来自 `state.json` 时 `inflight` 为 `null`。`resetTickets` 对 Codex 账号和从未读取到重置券的 Claude 账号为 `null`，否则为 `{ general, fable, nextExpiry, readAt, stale }`，其中 `stale` 表示该数量已超过一天未更新。账号地址的遮蔽方式与截图相同（`--redact`），令牌和凭据永远不会出现在报告中。
 
 ### HTTP 端点
 
@@ -274,12 +282,14 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 | `proxy.host` | `127.0.0.1` | 绑定地址。按设计仅限回环地址。 |
 | `proxy.claudePort` | `3456` | Claude 中继端口。 |
 | `proxy.codexPort` | `3457` | Codex 中继端口。 |
+| `proxy.grokPort` | `3458` | Grok 中继端口。可选；没有此项的旧配置会使用默认值。 |
 | `proxy.controlPort` | `3556` | TUI 和 `teamai usage` 通信所用的控制通道（`/probe`、`GET /usage`）。 |
 | `proxy.clientToken` | 自动生成 | 每个被中继的客户端都必须发送的本地令牌。 |
 | `switchThreshold` | `0.98` | 用量比例超过该值后，该账号不再被选中。 |
 | `warmupIntervalMs` | `300000` | 后台重新测量的间隔。`0` 表示禁用。 |
 | `maxConcurrentPerAccount` | `16` | 每个账号允许的并发在途请求数。设为 `0` 表示无限制。 |
 | `fableReserveThreshold` | `0.8` | 当账号的 Fable 窗口用量达到或超过该值时，优先把非 Fable 请求分给它。设为 1 关闭模型感知路由。 |
+| `display.hidden` | — | 可选。在 `v` 菜单中关闭的仪表盘项目，例如 `["section:codex", "activity"]`。仅影响显示。 |
 | `proxy.legacyPorts` | — | 可选。按提供方继续应答的额外端口 — 例如 { "claude": [3400] }。 |
 
 如果某个端口已被别的程序占用，请改掉它——这正是启动失败最常见的原因，具体原因会记录在 `server-start.log` 中。
@@ -289,6 +299,8 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 ## 适用范围与合规
 
 0.1 版本面向的是订阅制 OAuth 账号以及由包装器启动的 CLI 会话。它不对外提供 OpenAI 兼容的公开 API，不把 Claude 请求转换成 Codex 请求，不支持 Codex Desktop，也不会把不同人的凭据混在一个池里共用。遵守各服务商条款与政策的责任在你自己。生产环境／商业用途的 API 负载应当使用服务商官方的 API 计费方式。
+
+**有意不支持 Gemini / Antigravity。** 各家服务商的条款都把轮换多个订阅账号以绕过用量限制视为超出正常使用范围，但真正执行的是 Google：Antigravity 的 FAQ 明确写明个人方案不支持“自动轮换账号”，条款把通过第三方软件访问 Antigravity 列为停用理由，而把 Antigravity 或 Gemini CLI 登录凭据集中使用的开源工具在 2026 年全年都报告过账号被成批停用（再次违规即永久封禁）。此外，Antigravity CLI 没有任何文档化的端点改写方式，个人账号的登录凭据只保存在系统钥匙串中，要集中使用就只能由 TeamAI 自己持有 Google 令牌。Google 为第三方工具推荐的是 AI Studio 或 Vertex API 密钥，那是按量计费而不是订阅账号池，不在 TeamAI 的范围之内。
 
 ## 开发
 

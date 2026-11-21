@@ -5,8 +5,8 @@ import { AccountPool } from './account-pool.js';
 import { createProxy, secureEqual } from './proxy.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
-import { defaultConfig, loadConfig, loadCredentials, loadState, paths, readCredentialsText, saveCredentialsIfUnchanged, saveState } from './storage.js';
-import type { OAuthCredential, PersistedState, ProviderId, TeamAIConfig } from './types.js';
+import { defaultConfig, loadConfig, loadCredentials, loadState, paths, providerPort, readCredentialsText, saveCredentialsIfUnchanged, saveState } from './storage.js';
+import { PROVIDER_IDS, type OAuthCredential, type PersistedState, type ProviderId, type TeamAIConfig } from './types.js';
 import { buildUsageReport, requestUrl, serveUsage } from './usage.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
@@ -33,16 +33,16 @@ function bounded(work: Promise<unknown>, ms: number): Promise<void> {
 // which is the port every session started before the config was edited was
 // handed. Deduplicated, and never the live port itself.
 export function legacyPorts(config: TeamAIConfig, id: ProviderId): number[] {
-  const current = id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
+  const current = providerPort(config.proxy, id);
   const fallback = defaultConfig().proxy;
   const declared = config.proxy.legacyPorts?.[id] ?? [];
-  const builtIn = id === 'claude' ? fallback.claudePort : fallback.codexPort;
+  const builtIn = providerPort(fallback, id);
   return [...new Set([...declared, builtIn])].filter((p) => Number.isInteger(p) && p > 0 && p !== current);
 }
 
 export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
-  const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
+  const pools = PROVIDER_IDS.map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200);
   // Every save first adopts any credential the TUI wrote since (a re-login),
@@ -68,7 +68,7 @@ export async function runServer(): Promise<void> {
   const servers: Server[] = [];
   for (const pool of pools) {
     if (!pool.accounts.length) continue;
-    const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
+    const port = providerPort(config.proxy, pool.provider.id);
     const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity()); servers.push(server);
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
     // Past startup, a socket-level error must never end the process: the relay

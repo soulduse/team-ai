@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { inflateSync } from 'node:zlib';
 import { crc32, encodePng, renderFrame } from '../src/png.js';
 
 test('crc32 matches the published check values', () => {
@@ -26,4 +27,16 @@ test('renderFrame paints SGR backgrounds and draws every glyph the frame uses', 
   const cells = [...' 100%  ok ┌─┐ ● ↑↓ … → •'].length;
   assert.equal(png.readUInt32BE(16), cells * 9);
   assert.equal(png.readUInt32BE(20), 18);
+});
+
+test('renderFrame reads 24-bit and 256-color backgrounds', () => {
+  // Top-left pixel of a one-cell frame with no padding: a space only shows its background.
+  const firstPixel = (line: string): number[] => {
+    const png = renderFrame([line], 0); const idat = png.indexOf('IDAT', 0, 'latin1');
+    const raw = inflateSync(png.subarray(idat + 4, idat + 4 + png.readUInt32BE(idat - 4)));
+    return [...raw.subarray(1, 4)];
+  };
+  assert.deepEqual(firstPixel('\x1b[48;2;46;140;84m \x1b[0m'), [46, 140, 84]);
+  assert.deepEqual(firstPixel('\x1b[48;5;29m \x1b[0m'), [0, 135, 95]);
+  assert.deepEqual(firstPixel('\x1b[48;5;238m \x1b[0m'), [68, 68, 68]);
 });
