@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { codexUserId } from './auth.js';
+import { claudeOrganization, codexUserId } from './auth.js';
 import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
 
 const DEFAULT_GROK_PORT = 3458;
@@ -62,16 +62,19 @@ export async function loadState(): Promise<PersistedState> { return readJson(pat
 export async function saveState(value: PersistedState, commit?: () => Promise<boolean>): Promise<boolean> { return atomicWrite(paths().state, value, commit); }
 
 // The key a stored account is known by: the account id, plus the user for a
-// Codex workspace that several members share.
+// Codex workspace that several members share, or the organization for a Claude
+// person who holds more than one subscription.
 export function accountKey(credential: OAuthCredential): string {
-  return credential.userId ? `${credential.accountId}:${credential.userId}` : credential.accountId;
+  if (credential.userId) return `${credential.accountId}:${credential.userId}`;
+  return credential.organizationId ? `${credential.accountId}:${credential.organizationId}` : credential.accountId;
 }
 
 // Codex accounts stored before the user joined the key are keyed by the
 // workspace alone. Such a record is adopted only when it holds the same user;
 // another member of that workspace gets a row of their own instead of
 // overwriting it.
-function legacyAccount(config: TeamAIConfig, credentials: Record<string, OAuthCredential>, provider: ProviderId, label: string, credential: OAuthCredential): StoredAccount | undefined {
+async function legacyAccount(config: TeamAIConfig, credentials: Record<string, OAuthCredential>, provider: ProviderId, label: string, credential: OAuthCredential): Promise<StoredAccount | undefined> {
+  if (credential.organizationId) return legacyClaudeAccount(config, credentials, provider, credential);
   if (!credential.userId) return undefined;
   return config.accounts.find((a) => {
     if (a.provider !== provider || a.id !== credential.accountId) return false;
@@ -82,11 +85,35 @@ function legacyAccount(config: TeamAIConfig, credentials: Record<string, OAuthCr
   });
 }
 
+// Claude accounts stored before the organization joined the key are keyed by
+// the person alone. Such a record is adopted when its token belongs to the same
+// organization, or when its token can no longer be renewed: a re-login usually
+// follows exactly that, and keeping the dead record beside the new one would
+// leave a duplicate that only errors. A Claude token is opaque, so telling
+// takes a profile call; only when upstream cannot be reached does the login get
+// a row of its own — a duplicate can be disabled, an overwritten subscription
+// cannot be recovered.
+async function legacyClaudeAccount(config: TeamAIConfig, credentials: Record<string, OAuthCredential>, provider: ProviderId, credential: OAuthCredential): Promise<StoredAccount | undefined> {
+  for (const a of config.accounts) {
+    if (a.provider !== provider || a.id !== credential.accountId) continue;
+    const held = credentials[a.credentialId]; if (!held) continue;
+    if (held.organizationId) { if (held.organizationId === credential.organizationId) return a; continue; }
+    const found = await claudeOrganization(held);
+    if (found === 'lost') return a;
+    if (found === 'unknown') continue;
+    // A renewal spent the stored refresh token, so the renewed credential is
+    // kept even when this login turns out to be another organization's.
+    if (found.renewed) credentials[a.credentialId] = { ...found.renewed, ...(found.organizationId ? { organizationId: found.organizationId } : {}) };
+    if (found.organizationId === credential.organizationId) return a;
+  }
+  return undefined;
+}
+
 export async function upsertAccount(provider: ProviderId, label: string, credential: OAuthCredential): Promise<StoredAccount> {
   const config = await loadConfig();
   const credentials = await loadCredentials();
   const key = accountKey(credential);
-  const existing = config.accounts.find((a) => a.provider === provider && a.id === key) || legacyAccount(config, credentials, provider, label, credential);
+  const existing = config.accounts.find((a) => a.provider === provider && a.id === key) || await legacyAccount(config, credentials, provider, label, credential);
   const credentialId = existing?.credentialId || `${provider}:${key}`;
   const account: StoredAccount = existing || { id: key, provider, label, enabled: true, priority: null, credentialId, createdAt: new Date().toISOString() };
   // A migrated record keeps its credentialId, so its saved usage history stays attached.
