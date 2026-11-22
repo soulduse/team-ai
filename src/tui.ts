@@ -3,11 +3,24 @@ import { fileURLToPath } from 'node:url';
 import { login } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
-import { buildFrame, DISPLAY_ITEMS, displayOrder, ESC, toggleShown, visibleProviders, type FrameMode } from './frame.js';
+import { buildFrame, color, DISPLAY_ITEMS, displayOrder, ESC, remeasured, SPINNER, toggleShown, visibleProviders, type FrameMode, type RemeasureView } from './frame.js';
 import type { RedactLevel } from './redact.js';
 import { runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
 import type { PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
+import type { UsageAccountReport, UsageReport } from './usage.js';
+
+// How long the per-row ✓/✗ marks stay after `R` finishes, before the rows go
+// back to showing each reading's age.
+const REMEASURE_LINGER_MS = 4_000;
+// Why an account was not read, in a word: its bench first, then the read's own failure.
+function failureOf(account: UsageAccountReport): string | null {
+  if (account.errorKind === 'blocked') return 'blocked';
+  if (account.errorKind === 'refused') return 're-login';
+  if (account.errorKind === 'unreachable') return 'retrying';
+  return account.measureError ?? null;
+}
+const shortLabel = (label: string): string => (label.length > 16 ? `${label.slice(0, 15)}…` : label);
 
 export async function runTui(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
@@ -18,6 +31,8 @@ export async function runTui(): Promise<void> {
   let sortByHeadroom = true;
   // Cursor row in the `v` show/hide menu.
   let viewCursor = 0;
+  // Set while `R` runs and for a few seconds after; the frame draws per-row progress from it.
+  let remeasureView: RemeasureView | null = null;
   const ordering = (config: TeamAIConfig, state: PersistedState): StoredAccount[] => displayOrder(config.accounts, state, sortByHeadroom, visibleProviders(config));
   const rows = async (): Promise<StoredAccount[]> => ordering(await loadConfig(), await loadState());
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
@@ -25,7 +40,7 @@ export async function runTui(): Promise<void> {
   const render = async (): Promise<void> => {
     const config = await loadConfig(); const state = await loadState(); const visibleRows = ordering(config, state); const current = selected(visibleRows); if (current && !visibleRows.some((a) => a.credentialId === selectedId)) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40);
-    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, viewCursor });
+    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, viewCursor, remeasure: remeasureView ?? undefined });
     process.stdout.write(`${ESC}H${lines.join('\n')}`);
   };
 
@@ -36,20 +51,63 @@ export async function runTui(): Promise<void> {
   // Fleet-wide quota re-measure. The server owns the pools (and the committed
   // probe template), so this asks it over the local control channel rather than
   // restarting it — a restart only re-read profiles and left every bar blank.
+  //
+  // It can take most of a minute, and one static line made that look hung. So
+  // while it runs the footer spins with a count and the elapsed time, and each
+  // row's age column shows a spinner until the server has read that account,
+  // then ✓ — or ✗ and why, once the run is over. The server writes state.json
+  // only at the end, so progress is polled from GET /usage, which is live.
   const remeasure = async (): Promise<void> => {
-    busy = true; message = 'Re-measuring quota...'; await render();
+    busy = true;
+    const view: RemeasureView = { startedAt: Date.now(), finishedAt: null, tick: 0, live: {} };
+    remeasureView = view;
+    const config = await loadConfig();
+    const base = `http://${config.proxy.host}:${config.proxy.controlPort ?? config.proxy.claudePort + 100}`;
+    const headers = { authorization: `Bearer ${config.proxy.clientToken}` };
+    const credentialOf = new Map(config.accounts.map((account) => [account.id, account.credentialId]));
+    const done = (): number => config.accounts.filter((account) => remeasured(view, account.credentialId)).length;
+    // One poll at a time: a read can take up to 2s against a 500ms interval, and
+    // a slow one landing after the final read would put rows back to ✗.
+    let polling: Promise<void> | null = null;
+    const poll = (): Promise<void> => (polling ??= read().finally(() => { polling = null; }));
+    const read = async (): Promise<void> => {
+      try {
+        // Masked: only ids, times and failures are read here.
+        const response = await fetch(`${base}/usage?redact=full`, { headers, signal: AbortSignal.timeout(2_000) });
+        if (!response.ok) return;
+        const report = await response.json() as UsageReport;
+        for (const group of Object.values(report.providers ?? {})) for (const account of group?.accounts ?? []) {
+          const credentialId = credentialOf.get(account.id);
+          if (credentialId) view.live[credentialId] = { measuredAt: account.measuredAt ? Date.parse(account.measuredAt) : null, failure: failureOf(account) };
+        }
+      } catch { /* the next poll tries again; the final one decides */ }
+    };
+    const progress = (): void => {
+      const seconds = ((Date.now() - view.startedAt) / 1000).toFixed(1);
+      message = color(33, `${SPINNER[view.tick % SPINNER.length]} Re-measuring quota… ${done()}/${config.accounts.length} read · ${seconds}s`);
+    };
+    progress(); await render();
+    const ticker = setInterval(() => { view.tick++; progress(); void render(); }, 120);
+    const poller = setInterval(() => void poll(), 500);
     try {
-      const config = await loadConfig();
-      const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
-      const response = await fetch(`http://${config.proxy.host}:${port}/probe`, { headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(90_000) });
+      const response = await fetch(`${base}/probe`, { headers, signal: AbortSignal.timeout(90_000) });
       if (!response.ok) throw new Error(`control ${response.status}`);
-      const result = await response.json() as { targets: number; measured: number; ready: boolean; added: number; removed: number };
+      const result = await response.json() as { targets: number; measured: number; profiles?: number; ready: boolean; added: number; removed: number };
+      clearInterval(poller); if (polling) await polling; await poll();
       const fleet = [result.added ? `+${result.added}` : '', result.removed ? `-${result.removed}` : ''].filter(Boolean).join(' ');
-      message = !result.ready
-        ? 'No probe template yet — run one request through the proxy first'
-        : `Re-measured ${result.measured}/${result.targets} account(s)${fleet ? ` (${fleet})` : ''}`;
-    } catch (error) { message = `Re-measure failed: ${(error as Error).message}`; }
-    finally { busy = false; }
+      const live = Object.keys(view.live).length > 0;
+      const read = live ? done() : result.measured; const total = live ? config.accounts.length : result.targets;
+      const missed = config.accounts.filter((account) => live && !remeasured(view, account.credentialId));
+      const why = missed.slice(0, 3).map((account) => `${shortLabel(account.label)} ${view.live[account.credentialId]?.failure ?? 'no reading'}`).join(', ');
+      const summary = `Re-measured ${read}/${total} account(s)${fleet ? ` (${fleet})` : ''}${result.profiles ? ' · plans refreshed' : ''}${missed.length ? ` · ✗ ${missed.length}: ${why}${missed.length > 3 ? ', …' : ''}` : ''}`;
+      message = !result.ready ? color(33, 'No probe template yet — run one request through the proxy first')
+        : read === 0 ? color(31, `✗ ${summary}`) : missed.length ? color(33, `! ${summary}`) : color(32, `✓ ${summary}`);
+    } catch (error) { message = color(31, `✗ Re-measure failed: ${(error as Error).message}`); }
+    finally {
+      clearInterval(ticker); clearInterval(poller);
+      view.finishedAt = Date.now(); busy = false;
+      setTimeout(() => { if (remeasureView === view) { remeasureView = null; if (!closed) void render(); } }, REMEASURE_LINGER_MS).unref();
+    }
   };
   // Snapshot what is on screen — same width, cursor and sort — with account
   // addresses masked, so the result can be pasted somewhere public as is.

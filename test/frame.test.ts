@@ -209,3 +209,21 @@ test('a token server that did not answer reads as retrying; a refused token as e
   assert.equal(refreshErrorKind({ error: null }), null);
   assert.equal(refreshErrorKind({ error: 'Claude profile failed (401)' }), 'refused');
 });
+
+const plainFrame = (lines: string[]): string => plain(lines.join('\n'));
+test('a blocked account, a failed read and an R in progress each show in their row', () => {
+  const config: TeamAIConfig = { ...defaultConfig(), accounts: [account('claude', 'ok@x'), account('claude', 'late@x'), account('claude', 'slow@x')] };
+  const state = usage({ 'ok@x': 0.2, 'late@x': 0.3, 'slow@x': 0.4 });
+  state.accounts['cred-late@x']!.error = 'organization refuses OAuth'; state.accounts['cred-late@x']!.errorKind = 'blocked';
+  state.accounts['cred-slow@x']!.measuredAt = Date.now() - 3 * 3_600_000; state.accounts['cred-slow@x']!.measureError = '403';
+  const row = (text: string, label: string) => text.split('\n').find((line) => line.includes(label)) ?? '';
+  const still = plainFrame(buildFrame(config, state, { width: 140, selectedId: null, mode: 'normal', message: '', sortByHeadroom: false }));
+  assert.match(row(still, 'late@x'), /blocked/);
+  assert.match(row(still, 'slow@x'), /3h ago \(403\)/);
+  const startedAt = Date.now() - 1_000;
+  const live = { 'cred-ok@x': { measuredAt: Date.now(), failure: null }, 'cred-late@x': { measuredAt: null, failure: 'blocked' } };
+  const running = plainFrame(buildFrame(config, state, { width: 140, selectedId: null, mode: 'normal', message: '', sortByHeadroom: false, remeasure: { startedAt, finishedAt: null, tick: 2, live } }));
+  assert.match(row(running, 'ok@x'), /✓ updated/); assert.match(row(running, 'late@x'), /⠹ reading/);
+  const over = plainFrame(buildFrame(config, state, { width: 140, selectedId: null, mode: 'normal', message: '', sortByHeadroom: false, remeasure: { startedAt, finishedAt: Date.now(), tick: 9, live } }));
+  assert.match(row(over, 'late@x'), /✗ blocked/); assert.match(row(over, 'slow@x'), /✗ no reading/);
+});

@@ -449,3 +449,28 @@ test('a 401 whose token refresh cannot reach the server benches the account as r
     assert.ok(events.some((e) => /a auth refresh unreachable; retrying/.test(e)));
   } finally { proxy.close(); upstream.close(); }
 });
+
+test('a 403 naming the organization OAuth block benches that account at once and fails over', async () => {
+  const blockedBody = '{"type":"error","error":{"type":"permission_error","details":{"error_code":"oauth_not_allowed_for_organization"}}}';
+  const upstream = createServer(async (req, res) => {
+    const account = String(req.headers['x-test-account']);
+    req.resume(); await new Promise<void>((resolve) => req.once('end', resolve));
+    if (account === 'a') { res.writeHead(403, { 'content-type': 'application/json' }); res.end(blockedBody); }
+    else { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {}\n\n'); }
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve)); const address = upstream.address(); assert(address && typeof address !== 'string');
+  const provider: Provider = { ...claudeProvider, upstreamBase: `http://127.0.0.1:${address.port}`, refresh: async (c) => c, normalizePath: () => '/v1/messages', rewriteBody: (b) => b,
+    buildHeaders(incoming, account) { const result = new Headers(incoming); result.delete('authorization'); result.set('x-test-account', account.id); return result; } };
+  const stored = (id: string, priority: number): StoredAccount => ({ id, provider: 'claude', label: id, enabled: true, priority, credentialId: id, createdAt: '' });
+  const credential = (id: string): OAuthCredential => ({ accessToken: `secret-${id}`, refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [stored('a', 1), stored('b', 2)], { a: credential('a'), b: credential('b') }, { version: 1, accounts: {} });
+  const events: string[] = [];
+  const proxy = createProxy(pool, 'local-secret', (event) => { if (event) events.push(event); }); await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve)); const proxyAddress = proxy.address(); assert(proxyAddress && typeof proxyAddress !== 'string');
+  try {
+    const served = await fetch(`http://127.0.0.1:${proxyAddress.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(served.status, 200); await served.text();
+    const a = pool.accounts.find((x) => x.id === 'a')!;
+    assert.equal(a.errorKind, 'blocked'); assert.equal(a.cooldownUntil, null);
+    assert(events.some((e) => /a blocked: organization refuses OAuth/.test(e)));
+  } finally { proxy.close(); upstream.close(); }
+});

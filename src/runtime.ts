@@ -22,7 +22,8 @@ const QUICK_RETRY_MIN_MS = 30_000;
 const QUICK_RETRY_MAX_MS = 4 * 60_000;
 // How many notices state.json keeps, and which relay lines count as one.
 const NOTICE_LIMIT = 100;
-const REFRESH_FAILURE = /auth refresh (unreachable|refused)/;
+// An organization refusing OAuth is kept with them: it needs the user (billing), not a retry.
+const REFRESH_FAILURE = /auth refresh (unreachable|refused)| blocked: organization refuses OAuth/;
 
 // Wait for work, but no longer than ms. The work keeps running past the
 // deadline; whoever waits simply stops waiting. Failures are logged, not
@@ -213,16 +214,19 @@ export async function runServer(): Promise<void> {
     const changes = pools.map((p) => p.sync(latestConfig.accounts, latestCredentials)).reduce((a, b) => ({ added: a.added + b.added, removed: a.removed + b.removed }), { added: 0, removed: 0 });
     if (changes.added || changes.removed) {
       persist(`Fleet updated: ${changes.added} added, ${changes.removed} removed`, true);
-      // A new account has no profile yet; fill it so its plan renders with its
-      // first measurement rather than one refresh cycle later.
-      await Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0)));
     }
-    const results = await Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll()));
+    // Subscription status is re-read alongside: it otherwise moves only every
+    // six hours, so a bill paid a minute ago kept showing past_due after R.
+    // This is also what fills a just-added account's plan.
+    const [results, profiles] = await Promise.all([
+      Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll())),
+      Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0))).then((counts) => counts.reduce((a, b) => a + b, 0)),
+    ]);
     const total = results.reduce((acc, r) => ({ targets: acc.targets + r.targets, measured: acc.measured + r.measured }), { targets: 0, measured: 0 });
     const ready = total.measured > 0 || pools.some((p) => p.hasProbe());
-    if (total.targets) persist(`Quota re-measure: ${total.measured}/${total.targets} account(s)`);
+    if (total.targets) persist(`Quota re-measure: ${total.measured}/${total.targets} account(s)${profiles ? `, subscription status refreshed for ${profiles}` : ''}`);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ...total, ready, ...changes }));
+    res.end(JSON.stringify({ ...total, profiles, ready, ...changes }));
   });
   await new Promise<void>((resolve, reject) => { control.once('error', reject); control.listen(config.proxy.controlPort ?? config.proxy.claudePort + 100, config.proxy.host, () => { control.removeListener('error', reject); resolve(); }); });
   servers.push(control);

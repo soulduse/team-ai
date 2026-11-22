@@ -101,6 +101,12 @@ export interface ResetCredits {
   readAt?: number;
 }
 
+// Whether a subscription is in good standing. No profile or no status is
+// unknown, not unhealthy. Routing and the dashboard both judge by this.
+export function subscriptionHealthy(profile: Pick<SubscriptionProfile, 'status'> | null | undefined): boolean {
+  return !profile?.status || ['active', 'trialing'].includes(profile.status);
+}
+
 export interface SubscriptionProfile {
   status: string | null;
   createdAt: string | null;
@@ -123,6 +129,10 @@ export interface AccountRuntimeState {
   // own (the relay retries), 'refused' needs a re-login. Absent in state
   // written before the two were told apart.
   errorKind?: RefreshErrorKind | null;
+  // Why the last usage-endpoint read failed ("403", "timeout"), cleared by the
+  // next reading from any route. Without it a failing read left the old figures
+  // in place looking merely old, never broken.
+  measureError?: string | null;
   // When the quota figures above were last read from upstream, by any route
   // (response headers, the usage endpoint, a probe). The dashboard shows their
   // age so a number nobody has re-read does not pass for a live one.
@@ -145,7 +155,10 @@ export interface PersistedState {
   probes?: Partial<Record<ProviderId, ProbeTemplate>>;
 }
 
-export type RefreshErrorKind = 'unreachable' | 'refused';
+// 'unreachable' and 'refused' come from a token refresh. 'blocked' is not a token
+// problem: upstream refuses OAuth for the account's organization (Anthropic does
+// this while a subscription is past due). It heals when a usage read answers again.
+export type RefreshErrorKind = 'unreachable' | 'refused' | 'blocked';
 
 // What one token-refresh sweep did: counts for the summary, and a line per
 // account that failed or recovered for the notices.
@@ -169,6 +182,7 @@ export interface RuntimeAccount extends StoredAccount {
   lastUsed: number | null;
   error: string | null;
   errorKind?: RefreshErrorKind | null;
+  measureError?: string | null;
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
   measuredAt: number | null;
@@ -189,7 +203,10 @@ export interface FailureDecision {
   // 'quota' benches the whole account; 'model-quota' means only the
   // model-weekly (Fable) budget is spent, so the account still serves every
   // other model and is excluded from this request alone.
-  kind: 'quota' | 'model-quota' | 'auth' | 'forbidden' | 'transient' | 'fatal';
+  // 'blocked' is a 403 that names the account's organization, not the request:
+  // the account is benched until it answers again, with no 'every account 403s'
+  // doubt to hold the bench back.
+  kind: 'quota' | 'model-quota' | 'auth' | 'forbidden' | 'blocked' | 'transient' | 'fatal';
   retryAfterMs: number;
 }
 

@@ -30,7 +30,10 @@ export interface UsageAccountReport {
   cooldownReason: string | null;
   error: string | null;
   // 'unreachable': the relay is retrying on its own. 'refused': re-login needed.
+  // 'blocked': the organization refuses OAuth (billing); heals when it answers.
   errorKind: RefreshErrorKind | null;
+  // Why the last usage read failed ("403", "timeout"); null once a reading lands.
+  measureError: string | null;
   inflight: number | null;
   available: boolean;
 }
@@ -81,7 +84,7 @@ export function buildUsageReport(config: TeamAIConfig, state: PersistedState, op
       plan: saved?.profile?.rateLimitTier ?? null, usage, windows, measuredAt: iso(saved?.measuredAt),
       resetTickets: account.provider === 'claude' && saved?.resetCredits ? { general: saved.resetCredits.general, fable: saved.resetCredits.fable, nextExpiry: iso(saved.resetCredits.nextExpiry), readAt: iso(saved.resetCredits.readAt), stale: resetTicketsStale(saved.resetCredits, now) } : null,
       cooldownUntil: coolingDown ? iso(cooldownUntil) : null, cooldownReason: coolingDown ? status?.cooldownReason ?? null : null,
-      error: error === null ? null : mask(error), errorKind: refreshErrorKind(saved), inflight: status ? status.inflight : null, available,
+      error: error === null ? null : mask(error), errorKind: refreshErrorKind(saved), measureError: saved?.measureError ?? null, inflight: status ? status.inflight : null, available,
     });
     group.summary.accounts++; if (account.enabled) group.summary.enabled++; if (available) group.summary.available++;
   });
@@ -101,7 +104,7 @@ export function formatUsageTable(report: UsageReport): string {
     lines.push('', `${id}: ${group.summary.available}/${group.summary.enabled} available${group.summary.nextResetAt ? `, next reset ${AccountPool.formatDuration(Date.parse(group.summary.nextResetAt) - Date.parse(report.generatedAt))}` : ''}`);
     for (const account of group.accounts) {
       const windows = Object.entries(account.windows).map(([name, w]) => `${name} ${percent(w.usage)}${w.resetsInMs != null ? ` (${AccountPool.formatDuration(w.resetsInMs)})` : ''}`).join('  ');
-      const flags = [!account.enabled ? 'off' : '', account.cooldownUntil ? `cooldown${account.cooldownReason ? `:${account.cooldownReason}` : ''}` : '', account.error ? (account.errorKind === 'unreachable' ? 'retrying' : 'error') : '', account.inflight ? `${account.inflight} in flight` : ''].filter(Boolean).join(', ');
+      const flags = [!account.enabled ? 'off' : '', account.cooldownUntil ? `cooldown${account.cooldownReason ? `:${account.cooldownReason}` : ''}` : '', account.error ? (account.errorKind === 'unreachable' ? 'retrying' : account.errorKind === 'blocked' ? 'blocked' : 'error') : '', account.measureError ? `read failed:${account.measureError}` : '', account.inflight ? `${account.inflight} in flight` : ''].filter(Boolean).join(', ');
       const tickets = resetTickets(account.resetTickets);
       lines.push(`  ${account.available ? '●' : '○'} ${account.label}  ${windows || 'unmeasured'}${tickets ? `  resets ${tickets}${account.resetTickets?.stale ? ' (stale)' : ''}` : ''}${flags ? `  [${flags}]` : ''}`);
     }

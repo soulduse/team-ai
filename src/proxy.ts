@@ -187,6 +187,13 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         nextRetryAt = Math.max(nextRetryAt, Date.now() + decision.retryAfterMs);
         continue;
       }
+      // The organization refuses OAuth: the 403 names the account, so it is
+      // benched now — no waiting for another account to prove the request good.
+      if (decision.kind === 'blocked') {
+        pool.markBlocked(account); excluded.add(account.id);
+        onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} blocked: organization refuses OAuth (check billing); failover`);
+        continue;
+      }
       onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind} body: ${errorBody.replace(/\s+/g, ' ').slice(0, 300)}`);
       if (decision.kind === 'forbidden') {
         excluded.add(account.id);

@@ -372,3 +372,15 @@ test('grokUsageQuota reads the weekly window from /v1/billing', () => {
   assert.equal(grokUsageQuota({ config: {} }), null);
   assert.equal(grokUsageQuota({}), null);
 });
+
+test('Claude: a 403 naming the organization OAuth block is blocked, any other 403 forbidden; a blocked usage read says so', async () => {
+  const blockedBody = '{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}}}';
+  assert.equal(claudeProvider.classifyFailure(403, new Headers(), blockedBody).kind, 'blocked');
+  assert.equal(claudeProvider.classifyFailure(403, new Headers(), '{"error":{"type":"permission_error"}}').kind, 'forbidden');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(blockedBody, { status: 403 })) as typeof fetch;
+  try {
+    const cred = { accessToken: 't', refreshToken: null, expiresAt: Date.now() + 60_000, accountId: 'acct-blocked' } as never;
+    await assert.rejects(claudeProvider.fetchUsage!(cred), (error: { status?: number; blocked?: boolean; message?: string }) => error.status === 403 && error.blocked === true && /\(403, then 403\)/.test(error.message ?? ''));
+  } finally { globalThis.fetch = realFetch; }
+});

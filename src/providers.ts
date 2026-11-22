@@ -101,6 +101,22 @@ const TICKETS_USER_AGENT = 'claude-cli/2.1.322 (external, cli)';
 const TICKETS_RETRY_MS = 6 * 3_600_000;
 const ticketsRefusedUntil = new Map<string, number>();
 
+// Anthropic's answer, on every OAuth endpoint, while it refuses OAuth for an
+// organization — seen while a subscription was past due (2026-11-22). It names
+// the account, not the request, so it is not a 403 to doubt.
+const OAUTH_BLOCKED = 'oauth_not_allowed_for_organization';
+export function claudeOAuthBlocked(body: string): boolean { return body.includes(OAUTH_BLOCKED); }
+
+// A failed usage read, carrying its HTTP status and whether the organization is
+// refusing OAuth, so the pool can show why and bench a blocked account.
+export class UsageReadError extends Error {
+  constructor(readonly status: number, readonly blocked: boolean, detail = String(status)) { super(`Claude usage failed (${detail})${blocked ? ` ${OAUTH_BLOCKED}` : ''}`); }
+}
+async function usageReadError(response: Response, detail?: string): Promise<UsageReadError> {
+  const body = await response.text().catch(() => '');
+  return new UsageReadError(response.status, claudeOAuthBlocked(body), detail);
+}
+
 // `cedar_ember` (asked for with ?cedar_ember=1) lists the limit-reset tickets. A
 // ticket whose `clears` names `seven_day` resets the whole weekly limit; one
 // that does not clears only the model-scoped (Fable) window. Paused or used-up
@@ -203,8 +219,9 @@ export const claudeProvider: Provider = {
     const routing = ['5h', '7d'].map((name) => windows[name]).filter((x) => x?.usage !== null && x?.usage !== undefined).sort((a, b) => (b?.usage ?? 0) - (a?.usage ?? 0))[0];
     return Object.keys(windows).length ? { routingUsage: routing?.usage ?? null, routingResetsAt: routing?.resetsAt ?? null, windows } : null;
   },
-  classifyFailure(status, headers) {
+  classifyFailure(status, headers, body) {
     if (status === 401) return { kind: 'auth', retryAfterMs: 0 };
+    if (status === 403 && claudeOAuthBlocked(body)) return { kind: 'blocked', retryAfterMs: 0 };
     if (status === 403) return { kind: 'forbidden', retryAfterMs: 30 * 60_000 };
     if (status === 429) {
       // A rejected status can appear on a named window (5h, 7d, 7d_oi, …) OR on
@@ -314,18 +331,18 @@ export const claudeProvider: Provider = {
       // plain way and stop asking for a while, so every poll does not cost two requests. Not on
       // 401 (dead token), 429 (rate limited) or 5xx (outage): a second call there only adds load.
       if (![400, 403, 404].includes(response.status)) {
-        if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
+        if (!response.ok) throw await usageReadError(response);
         return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
       }
       await response.body?.cancel();
       const plain = await fetch(CLAUDE_USAGE_URL, { headers, signal: AbortSignal.timeout(15_000) });
-      if (!plain.ok) throw new Error(`Claude usage failed (${response.status}, then ${plain.status})`);
+      if (!plain.ok) throw await usageReadError(plain, `${response.status}, then ${plain.status}`);
       // Only now is it the ticket form that was refused: the same token reads the plain form fine.
       ticketsRefusedUntil.set(credential.accountId, Date.now() + TICKETS_RETRY_MS);
       return claudeUsageQuota(await plain.json() as Parameters<typeof claudeUsageQuota>[0]);
     }
     const response = await fetch(CLAUDE_USAGE_URL, { headers, signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
+    if (!response.ok) throw await usageReadError(response);
     return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
   },
 };

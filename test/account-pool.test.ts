@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
-import type { OAuthCredential, PersistedState, Provider, QuotaSnapshot, StoredAccount } from '../src/types.js';
+import type { OAuthCredential, PersistedState, Provider, QuotaSnapshot, RuntimeAccount, StoredAccount } from '../src/types.js';
 
 const provider: Provider = {
   id: 'codex', label: 'Codex', upstreamBase: 'https://example.test', normalizePath: (p) => p,
@@ -689,4 +689,58 @@ test('a sweep that finds another running reports itself as skipped', async () =>
   const first = pool.refreshLapsed();
   assert.equal((await pool.refreshLapsed({ onlyUnreachable: true })).skipped, true);
   release(); assert.equal((await first).skipped, undefined);
+});
+
+test('an organization that refuses OAuth benches the account until a usage read answers again', async () => {
+  let blocked = true;
+  const usageProvider: Provider = { ...provider, refresh: async (c) => ({ ...c, accessToken: 'renewed' }),
+    fetchUsage: async () => { if (blocked) throw Object.assign(new Error('Claude usage failed (403)'), { status: 403, blocked: true }); return { routingUsage: 0.3, routingResetsAt: null, windows: { primary: { usage: 0.3, resetsAt: null } } }; } };
+  const pool = new AccountPool(usageProvider, [account('a'), account('b')], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state);
+  const a = pool.accounts[0]!;
+  pool.markBlocked(a);
+  assert.equal(a.errorKind, 'blocked');
+  const chosen = pool.acquire('s'); assert.equal(chosen?.id, 'b'); pool.release(chosen!);
+  // a new token is not an answer: the block stays, and the keep-alive sweep leaves it alone
+  await pool.refresh(a, true); assert.equal(a.errorKind, 'blocked');
+  pool.accounts[1]!.credential.expiresAt = Date.now() + 3_600_000;
+  const sweep = await pool.refreshLapsed(); assert.equal(sweep.outcomes.length, 0);
+  // still refused: the read is marked failed, the block holds
+  await pool.refreshUsage(0);
+  assert.equal(a.measureError, '403'); assert.equal(a.errorKind, 'blocked');
+  // the organization answers again: benched no more, and the failure clears with the reading
+  blocked = false;
+  const measured = await pool.refreshUsage(0);
+  assert(measured.has('a')); assert.equal(a.error, null); assert.equal(a.measureError, null); assert.equal(a.usage, 0.3);
+});
+
+test('a failed usage read is recorded as its status or network cause, and a 403 that is not a block does not bench', async () => {
+  const failing: Provider = { ...provider, fetchUsage: async (c) => { if (c.accountId === 'a') throw Object.assign(new Error('Claude usage failed (403)'), { status: 403, blocked: false }); throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }); } };
+  const pool = new AccountPool(failing, [account('a'), account('b')], { 'codex:a': credential('a'), 'codex:b': credential('b') }, state);
+  await pool.refreshUsage(0);
+  assert.equal(pool.accounts[0]!.measureError, '403'); assert.equal(pool.accounts[0]!.error, null);
+  assert.equal(pool.accounts[1]!.measureError, 'timeout');
+  const output: PersistedState = { version: 1, accounts: {} }; pool.exportState(output);
+  assert.equal(output.accounts['codex:a']?.measureError, '403');
+});
+
+test('a subscription in arrears is spent last, but still serves when nothing else can', () => {
+  const pool = new AccountPool(provider, [account('late'), account('paid')], { 'codex:late': credential('late'), 'codex:paid': credential('paid') }, state);
+  const profile = (status: string) => ({ status, createdAt: null, rateLimitTier: null, orgType: null, hasClaudeMax: null, hasClaudePro: null, fetchedAt: 0 });
+  const [late, paid] = pool.accounts as [RuntimeAccount, RuntimeAccount];
+  late.profile = profile('past_due'); late.usage = 0.1; paid.profile = profile('active'); paid.usage = 0.6;
+  const first = pool.acquire('one'); assert.equal(first?.id, 'paid'); pool.release(first!);
+  paid.enabled = false;
+  const fallback = pool.acquire('two'); assert.equal(fallback?.id, 'late');
+});
+
+test('a keep-alive refresh that fails on a blocked account leaves the block in place', async () => {
+  let fail = true;
+  const flaky: Provider = { ...provider, refresh: async (c) => { if (fail) throw new TypeError('fetch failed'); return { ...c, expiresAt: Date.now() + 3_600_000 }; } };
+  const pool = new AccountPool(flaky, [account('a')], { 'codex:a': { ...credential('a'), expiresAt: Date.now() } }, state);
+  const a = pool.accounts[0]!;
+  pool.markBlocked(a);
+  await pool.refreshLapsed(); assert.equal(a.errorKind, 'blocked');
+  fail = false;
+  await pool.refreshLapsed(); assert.equal(a.errorKind, 'blocked');
+  assert.equal(pool.acquire('s'), null);
 });

@@ -2,7 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
-import { PROVIDER_IDS, type AccountRuntimeState, type DisplayItem, type PersistedState, type ProviderId, type RefreshErrorKind, type StoredAccount, type ResetCredits, type SubscriptionProfile, type TeamAIConfig } from './types.js';
+import { PROVIDER_IDS, subscriptionHealthy, type AccountRuntimeState, type DisplayItem, type PersistedState, type ProviderId, type RefreshErrorKind, type StoredAccount, type ResetCredits, type SubscriptionProfile, type TeamAIConfig } from './types.js';
 import { providerPort } from './storage.js';
 
 // Everything the `v` menu can show or hide, in menu order. The menu, the
@@ -50,7 +50,7 @@ const TONES: Record<string, Tone> = {
 };
 const truecolor = (): boolean => /truecolor|24bit/i.test(process.env.COLORTERM ?? '');
 const tone = (layer: 38 | 48, name: string): string => { const t = TONES[name]!; return truecolor() ? `${layer};2;${t.rgb.join(';')}` : `${layer};5;${t.xterm}`; };
-const color = (code: number, text: string): string => `${ESC}${TONES[`fg${code}`] ? tone(38, `fg${code}`) : code}m${text}${RESET}`;
+export const color = (code: number, text: string): string => `${ESC}${TONES[`fg${code}`] ? tone(38, `fg${code}`) : code}m${text}${RESET}`;
 const visible = (text: string): number => text.replace(ANSI, '').length;
 const fit = (text: string, width: number): string => { const plain = text.replace(ANSI, ''); if (plain.length > width) return `${plain.slice(0, Math.max(0, width - 1))}…`; return text + ' '.repeat(Math.max(0, width - visible(text))); };
 
@@ -75,11 +75,37 @@ function bar(usage: number | null | undefined, reset: number | null | undefined,
 // routes to and the usage sweep runs on a timer, so without this a number
 // nobody has re-read looks exactly like a live one. Dim while fresh, yellow
 // once it is older than a few sweeps would allow.
-function age(at: number | null | undefined): string {
-  if (!at) return color(90, 'unmeasured');
-  const mins = Math.max(0, Math.floor((Date.now() - at) / 60_000));
-  const text = mins < 1 ? 'now' : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`;
-  return color(mins > 15 ? 33 : 90, text);
+// A failed last read is red with its reason: the figures are kept as the last
+// known, but they are no longer merely old — nothing is refreshing them.
+function age(at: number | null | undefined, failure?: string | null): string {
+  const mins = at ? Math.max(0, Math.floor((Date.now() - at) / 60_000)) : null;
+  const text = mins === null ? 'unmeasured' : mins < 1 ? 'now' : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`;
+  if (failure) return color(31, `${text} (${failure})`);
+  return mins === null ? color(90, text) : color(mins > 15 ? 33 : 90, text);
+}
+
+// An `R` in progress, or just finished, as the TUI sees it: when it started,
+// a spinner tick, and each account's live reading polled from the server
+// (state.json is written only once the whole re-measure is done). Keyed by
+// credentialId. A capture never carries one.
+export interface RemeasureView {
+  startedAt: number;
+  finishedAt: number | null;
+  tick: number;
+  live: Record<string, { measuredAt: number | null; failure: string | null }>;
+}
+export const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+// Whether this run has read the account yet.
+export function remeasured(view: RemeasureView, credentialId: string): boolean {
+  const at = view.live[credentialId]?.measuredAt;
+  return at != null && at >= view.startedAt;
+}
+// The age column while `R` runs: a spinner until the account is read, then
+// `✓ updated`, or — once the run is over — `✗` and why it was not.
+function progress(view: RemeasureView, credentialId: string): string {
+  if (remeasured(view, credentialId)) return color(32, '✓ updated');
+  if (view.finishedAt === null) return color(36, `${SPINNER[view.tick % SPINNER.length]} reading`);
+  return color(31, `✗ ${view.live[credentialId]?.failure ?? 'no reading'}`);
 }
 
 // Why an account's error is set: 'unreachable' heals on its own (the relay
@@ -90,7 +116,7 @@ export function refreshErrorKind(saved: Pick<AccountRuntimeState, 'error' | 'err
   return saved.errorKind ?? (/token refresh unreachable/.test(saved.error) ? 'unreachable' : 'refused');
 }
 
-function healthy(profile: SubscriptionProfile | null | undefined): boolean { return !profile?.status || ['active', 'trialing'].includes(profile.status); }
+const healthy = subscriptionHealthy;
 // ChatGPT plan ids are lowercase slugs ('pro', 'prolite', 'plus', 'team'); show
 // them the way the product names them so a Codex row reads like a Claude one.
 function codexPlan(profile: SubscriptionProfile | null | undefined): string {
@@ -212,6 +238,8 @@ export interface FrameView {
   sortByHeadroom: boolean;
   // Row of DISPLAY_ITEMS under the cursor while the `v` menu is open.
   viewCursor?: number;
+  // Set while `R` runs and for a moment after, so each row shows its progress.
+  remeasure?: RemeasureView;
 }
 
 // The normal-mode key hints. When they do not fit, the ones a user is least
@@ -277,10 +305,10 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       : Array.from({ length: codexWindowCount }, (_, index) => index).filter(codexSlotOn).map((index) => slot(spanAt(index))).join('');
     lines.push(color(90, fit(`  ${fit('account', 24)}${headCells('plan', 'state', 'order')}${usageTitles}`, width)));
     for (const account of group) {
-      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? (refreshErrorKind(saved) === 'unreachable' ? color(33, 'retrying') : color(31, 'error')) : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
+      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? (refreshErrorKind(saved) === 'unreachable' ? color(33, 'retrying') : refreshErrorKind(saved) === 'blocked' ? color(31, 'blocked') : color(31, 'error')) : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : provider === 'codex' ? codexPlan(profile) : '—';
       const head = `${cursor} ${fit(account.label, 24)}${headCells(plan, enabled, rank)}`;
-      const measured = on('col:age') ? ` ${age(saved?.measuredAt)}` : '';
+      const measured = !on('col:age') ? '' : view.remeasure ? ` ${progress(view.remeasure, account.credentialId)}` : ` ${age(saved?.measuredAt, saved?.measureError)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
         const gauges = [claudeSession ? bar(session?.usage, session?.resetsAt, barWidth) : '', on('gauge:7d') ? bar(weekly?.usage, weekly?.resetsAt, barWidth) : '', on('gauge:fable') ? bar(fable?.usage, fable?.resetsAt, barWidth) : ''].filter(Boolean).map((gauge) => ` ${gauge}`).join('');
@@ -324,6 +352,6 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';
-  lines.push(status && footer.length + status.length > width ? `${fit(footer, Math.max(0, width - status.length))}${status}` : fit(`${footer}${status}`, width));
+  lines.push(status && footer.length + visible(status) > width ? `${fit(footer, Math.max(0, width - visible(status)))}${status}` : fit(`${footer}${status}`, width));
   return (height === undefined ? lines : lines.slice(0, height)).map((line) => fit(line, width));
 }
