@@ -491,13 +491,17 @@ const GROK_UPSTREAM = 'https://cli-chat-proxy.grok.com';
 const GROK_QUOTA_CODES = /^(usage_limit_reached|usage_pool_exhausted|quota_exceeded|insufficient_quota)$/;
 
 // Grok's /v1/billing?format=credits, the read-out behind its /usage screen:
-// one weekly window as a percentage, with the period it belongs to.
+// one weekly window as a percentage, with the period it belongs to. A period
+// with nothing used yet (a fresh week, or right after a plan upgrade) leaves
+// creditUsagePercent out entirely, so a known period without it reads as 0%.
 interface GrokBillingPeriod { start?: string | null; end?: string | null }
 export function grokUsageQuota(data: { config?: { creditUsagePercent?: number | null; currentPeriod?: GrokBillingPeriod | null; billingPeriodStart?: string | null; billingPeriodEnd?: string | null } | null }): QuotaSnapshot | null {
-  const config = data.config; const percent = config?.creditUsagePercent;
-  if (typeof percent !== 'number' || !Number.isFinite(percent)) return null;
+  const config = data.config;
   const start = timestamp(config?.currentPeriod?.start ?? config?.billingPeriodStart ?? null);
   const end = timestamp(config?.currentPeriod?.end ?? config?.billingPeriodEnd ?? null);
+  const reported = config?.creditUsagePercent;
+  const percent = typeof reported === 'number' && Number.isFinite(reported) ? reported : reported == null && end !== null ? 0 : null;
+  if (percent === null) return null;
   const usage = Math.max(0, Math.min(1, percent / 100));
   const minutes = start !== null && end !== null && end > start ? Math.round((end - start) / 60_000) : null;
   return { routingUsage: usage, routingResetsAt: end, windows: { weekly: { usage, resetsAt: end, minutes } } };
@@ -552,6 +556,20 @@ export const grokProvider: Provider = {
     const response = await fetch(`${GROK_UPSTREAM}/v1/billing?format=credits`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'x-xai-token-auth': 'xai-grok-cli' }, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Grok usage failed (${response.status})`);
     return grokUsageQuota(await response.json() as Parameters<typeof grokUsageQuota>[0]);
+  },
+  async fetchProfile(credential) {
+    // xAI has no plan endpoint the CLI token can reach; the plan rides in the
+    // access token's numeric `tier` claim, fixed when the token was issued — so
+    // a plan change shows only once the token is next refreshed.
+    const part = credential.accessToken.split('.')[1];
+    let tier: string | null = null;
+    if (part) {
+      try {
+        const claims = JSON.parse(Buffer.from(part, 'base64url').toString()) as Record<string, unknown>;
+        if (typeof claims.tier === 'number' || typeof claims.tier === 'string') tier = String(claims.tier);
+      } catch { /* opaque token */ }
+    }
+    return { status: 'active', createdAt: null, rateLimitTier: tier, orgType: null, hasClaudeMax: null, hasClaudePro: null, fetchedAt: Date.now() };
   },
 };
 

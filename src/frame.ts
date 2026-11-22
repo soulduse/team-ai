@@ -132,6 +132,15 @@ function codexPlan(profile: SubscriptionProfile | null | undefined): string {
   // plan name is the whole of what can be known.
   return names[raw.toLowerCase()] || raw;
 }
+// Grok's token names its plan only as a number, and xAI publishes no table.
+// 1 was read on a Super account; 0 is assumed to be the plan below it
+// (Premium), not yet confirmed. Any other number is shown as it is.
+const GROK_TIERS: Record<string, string> = { '0': 'Premium', '1': 'Super' };
+export function grokPlan(profile: SubscriptionProfile | null | undefined): string {
+  const raw = profile?.rateLimitTier;
+  if (!raw) return '—';
+  return GROK_TIERS[raw] ?? `tier ${raw}`;
+}
 // Anthropic renamed Max 20x to Ultra (November 2026), but the profile API still
 // reports 'default_claude_max_20x', so the 20x tier is shown under its current
 // name; a later 'ultra' tier or org type reads the same. A tier this function
@@ -306,7 +315,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     lines.push(color(90, fit(`  ${fit('account', 24)}${headCells('plan', 'state', 'order')}${usageTitles}`, width)));
     for (const account of group) {
       const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? (refreshErrorKind(saved) === 'unreachable' ? color(33, 'retrying') : refreshErrorKind(saved) === 'blocked' ? color(31, 'blocked') : color(31, 'error')) : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : account.fableOnly && account.provider === 'claude' && (Object.entries(saved?.windows ?? {}).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage ?? 0) < 1 ? color(35, 'fable') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
-      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : provider === 'codex' ? codexPlan(profile) : '—';
+      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? claudeTier(profile) : provider === 'codex' ? codexPlan(profile) : grokPlan(profile);
       const head = `${cursor} ${fit(account.label, 24)}${headCells(plan, enabled, rank)}`;
       const measured = !on('col:age') ? '' : view.remeasure ? ` ${progress(view.remeasure, account.credentialId)}` : ` ${age(saved?.measuredAt, saved?.measureError)}`;
       if (provider === 'claude') {

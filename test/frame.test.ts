@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFrame, claudeTier, refreshErrorKind, DISPLAY_ITEMS, displayOrder, resetTicketsNote, toggleShown, visibleProviders } from '../src/frame.js';
+import { buildFrame, claudeTier, grokPlan, refreshErrorKind, DISPLAY_ITEMS, displayOrder, resetTicketsNote, toggleShown, visibleProviders } from '../src/frame.js';
 import { defaultConfig } from '../src/storage.js';
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
@@ -77,6 +77,15 @@ test('buildFrame pads to the terminal height when given one and not otherwise', 
   const view = { width: 100, selectedId: null, mode: 'normal' as const, message: '', sortByHeadroom: true };
   assert.equal(buildFrame(config, usage({}), { ...view, height: 40 }).length, 40);
   assert.ok(buildFrame(config, usage({}), view).length < 40);
+});
+
+test('grokPlan: a known tier number is named, any other shown as the number', () => {
+  const p = (rateLimitTier: string | null) => ({ status: 'active', createdAt: null, rateLimitTier, orgType: null, hasClaudeMax: null, hasClaudePro: null, fetchedAt: 0 });
+  assert.equal(grokPlan(null), '—');
+  assert.equal(grokPlan(p(null)), '—');
+  assert.equal(grokPlan(p('0')), 'Premium');
+  assert.equal(grokPlan(p('1')), 'Super');
+  assert.equal(grokPlan(p('3')), 'tier 3');
 });
 
 test('claudeTier: Max multipliers, the Ultra rename, and unknown tiers shown as reported', () => {

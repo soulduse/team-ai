@@ -369,8 +369,21 @@ test('grokUsageQuota reads the weekly window from /v1/billing', () => {
   assert.equal(quota?.windows.weekly?.resetsAt, Date.parse('2026-11-23T01:47:27.026Z'));
   assert.equal(quota?.windows.weekly?.minutes, 10080);
   assert.equal(grokUsageQuota({ config: { creditUsagePercent: 140 } })?.routingUsage, 1);
+  // Nothing used yet: the percent is left out, the period is not.
+  const fresh = grokUsageQuota({ config: { currentPeriod: { start: '2026-11-18T11:50:46.079+00:00', end: '2026-11-25T11:50:46.079+00:00' }, billingPeriodStart: '2026-11-18T11:50:46.079+00:00', billingPeriodEnd: '2026-11-25T11:50:46.079+00:00' } });
+  assert.equal(fresh?.routingUsage, 0);
+  assert.equal(fresh?.windows.weekly?.resetsAt, Date.parse('2026-11-25T11:50:46.079Z'));
+  assert.equal(grokUsageQuota({ config: { billingPeriodEnd: '2026-11-25T11:50:46.079+00:00' } })?.routingUsage, 0);
   assert.equal(grokUsageQuota({ config: {} }), null);
   assert.equal(grokUsageQuota({}), null);
+});
+
+test('Grok profile: the plan is the access token\'s tier claim', async () => {
+  const token = (claims: Record<string, unknown>) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+  const cred = (accessToken: string) => ({ accessToken, refreshToken: null, expiresAt: null, accountId: 'a' });
+  assert.equal((await grokProvider.fetchProfile!(cred(token({ tier: 1 })))).rateLimitTier, '1');
+  assert.equal((await grokProvider.fetchProfile!(cred(token({ sub: 'x' })))).rateLimitTier, null);
+  assert.equal((await grokProvider.fetchProfile!(cred('opaque'))).rateLimitTier, null);
 });
 
 test('Claude: a 403 naming the organization OAuth block is blocked, any other 403 forbidden; a blocked usage read says so', async () => {
