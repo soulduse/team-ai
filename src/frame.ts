@@ -133,9 +133,10 @@ function codexPlan(profile: SubscriptionProfile | null | undefined): string {
   return names[raw.toLowerCase()] || raw;
 }
 // Grok's token names its plan only as a number, and xAI publishes no table.
-// 1 was read on a Super account; 0 is assumed to be the plan below it
-// (Premium), not yet confirmed. Any other number is shown as it is.
-const GROK_TIERS: Record<string, string> = { '0': 'Premium', '1': 'Super' };
+// 7 was read on a Super account from a token issued after the upgrade; the
+// token read before it carried 1, the earlier plan, whose name is not known.
+// Any number not named here is shown as it is.
+const GROK_TIERS: Record<string, string> = { '7': 'Super' };
 export function grokPlan(profile: SubscriptionProfile | null | undefined): string {
   const raw = profile?.rateLimitTier;
   if (!raw) return '—';

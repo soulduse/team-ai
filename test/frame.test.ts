@@ -83,8 +83,8 @@ test('grokPlan: a known tier number is named, any other shown as the number', ()
   const p = (rateLimitTier: string | null) => ({ status: 'active', createdAt: null, rateLimitTier, orgType: null, hasClaudeMax: null, hasClaudePro: null, fetchedAt: 0 });
   assert.equal(grokPlan(null), '—');
   assert.equal(grokPlan(p(null)), '—');
-  assert.equal(grokPlan(p('0')), 'Premium');
-  assert.equal(grokPlan(p('1')), 'Super');
+  assert.equal(grokPlan(p('7')), 'Super');
+  assert.equal(grokPlan(p('1')), 'tier 1');
   assert.equal(grokPlan(p('3')), 'tier 3');
 });
 
