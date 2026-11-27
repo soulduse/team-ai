@@ -310,3 +310,24 @@ test('failover refused: keeps serving a still-live token and does not retry on t
   assert.equal(calls, 1);
   assert.equal(pool.takeFailovers(), 0);
 });
+
+// ── security: error text never carries credential fragments ──────────────────
+import { leaderUnreachable, safeCause } from '../src/sync.js';
+
+test('a malformed leader file never leaks its contents into the error', async () => {
+  const run = async () => '{"claude:a":{"accessToken":"sk-ant-SECRET-123","refreshToken":"rt-SECRET"';
+  const pull = sshPuller({ role: 'follower', peer: 'macbook' }, run, () => 0);
+  const error = await pull().catch((e: Error) => e);
+  assert.ok(error instanceof Error);
+  assert.doesNotMatch(error.message, /SECRET|accessToken|sk-ant/);
+  assert.match(error.message, /invalid JSON/);
+});
+
+test('safeCause keeps only fixed words and numeric fields', () => {
+  assert.equal(safeCause(new SyntaxError('Unexpected token "sk-ant-SECRET" is not valid JSON')), 'invalid JSON');
+  assert.equal(safeCause(Object.assign(new Error('Command failed: ssh ... sk-ant-SECRET'), { code: 255 })), 'ssh exit 255');
+  assert.equal(safeCause(Object.assign(new Error('x'), { killed: true, signal: 'SIGTERM' })), 'timed out');
+  assert.equal(safeCause(Object.assign(new Error('spawn ssh ENOENT'), { code: 'ENOENT' })), 'ENOENT');
+  assert.equal(safeCause(Object.assign(new Error('sk-ant-SECRET'), { code: 'sk-ant-SECRET' })), 'error');
+  assert.doesNotMatch(leaderUnreachable('macbook', new Error('sk-ant-SECRET')).message, /SECRET/);
+});

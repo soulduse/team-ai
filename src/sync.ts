@@ -70,8 +70,24 @@ const runSsh: Runner = (args, timeoutMs) => new Promise((resolve, reject) => {
 // An unreachable leader is reported the way an unreachable token endpoint is,
 // so the account is benched and retried rather than shown as needing a re-login.
 export function leaderUnreachable(peer: string, cause: unknown): Error {
-  return Object.assign(new Error(`leader ${peer} unreachable (${(cause as Error)?.message ?? String(cause)})`), { name: 'TimeoutError' });
+  return Object.assign(new Error(`leader ${peer} unreachable (${safeCause(cause)})`), { name: 'TimeoutError' });
 }
+
+// Errors here end up in notices and state.json, so their text is never copied:
+// a JSON.parse message quotes the input it choked on (a credentials file), and
+// ssh/child stderr can echo anything. Only fixed words and numeric fields pass.
+export function safeCause(cause: unknown): string {
+  if (cause instanceof SyntaxError) return 'invalid JSON';
+  const e = cause as { code?: unknown; killed?: boolean; signal?: unknown; name?: string } | null;
+  if (e?.killed || e?.name === 'TimeoutError') return 'timed out';
+  if (typeof e?.signal === 'string') return `signal ${e.signal}`;
+  if (typeof e?.code === 'number') return `ssh exit ${e.code}`;
+  if (typeof e?.code === 'string' && /^E[A-Z]+$/.test(e.code)) return e.code;
+  return 'error';
+}
+
+// Known, token-free stderr phrases worth surfacing; anything else is dropped.
+const SAFE_STDERR = /(command not found|No such file or directory|Permission denied|Host key verification failed|Connection refused|Could not resolve hostname)/;
 
 // Only a failure to reach the leader at all counts toward failover: ssh exits
 // 255 on a connection or authentication failure, and a timeout kills it. A
@@ -135,7 +151,7 @@ const runSshWithInput: InputRunner = (args, input, timeoutMs) => new Promise((re
   const timer = setTimeout(() => { child.kill(); reject(Object.assign(new Error('push timed out'), { name: 'TimeoutError' })); }, timeoutMs);
   child.stdout.on('data', (d) => { out += d; }); child.stderr.on('data', (d) => { err += d; });
   child.on('error', (e) => { clearTimeout(timer); reject(e); });
-  child.on('close', (code) => { clearTimeout(timer); if (code === 0) resolve(out); else reject(new Error(`ssh exit ${code}: ${err.trim().slice(-200)}`)); });
+  child.on('close', (code) => { clearTimeout(timer); if (code === 0) resolve(out); else { const hint = SAFE_STDERR.exec(err)?.[1]; reject(Object.assign(new Error(`ssh exit ${code}${hint ? `: ${hint}` : ''}`), { code })); } });
   child.stdin.on('error', () => { /* the child exited first; close reports why */ });
   child.stdin.end(input);
 });

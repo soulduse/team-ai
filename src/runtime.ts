@@ -8,7 +8,7 @@ import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, providerPort, readCredentialsText, saveCredentialsIfUnchanged, saveState } from './storage.js';
 import { PROVIDER_IDS, type OAuthCredential, type PersistedState, type ProviderId, type RefreshSweep, type TeamAIConfig } from './types.js';
 import { buildUsageReport, requestUrl, serveUsage } from './usage.js';
-import { DEFAULT_FAILOVER_AFTER_MS, DEFAULT_SYNC_INTERVAL_MS, followedProviders, sshPuller, sshPusher, type OAuthRecords } from './sync.js';
+import { DEFAULT_FAILOVER_AFTER_MS, DEFAULT_SYNC_INTERVAL_MS, followedProviders, safeCause, sshPuller, sshPusher, type OAuthRecords } from './sync.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
 const DRAIN_MS = 5_000;
@@ -221,8 +221,8 @@ export async function runServer(): Promise<void> {
           catch (error) {
             // A notice on the first failure and then every half hour, not every cycle.
             pushFailures++;
-            const hint = /command not found|ssh exit 127/.test((error as Error).message) ? ' (set sync.node to node’s full path on the leader)' : '';
-            persist(`Push back to ${peer} failed: ${(error as Error).message}${hint} — retrying`, pushFailures === 1 || pushFailures % alarmAfter === 0);
+            const hint = /command not found|ssh exit 127/.test((error as Error).message) /* message is built from fixed words only (sync.ts runSshWithInput) */ ? ' (set sync.node to node’s full path on the leader)' : '';
+            persist(`Push back to ${peer} failed: ${safeCause(error)}${hint} — retrying`, pushFailures === 1 || pushFailures % alarmAfter === 0);
             return;
           }
           pushFailures = 0;
