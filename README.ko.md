@@ -293,10 +293,29 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 | `fableReserveThreshold` | `0.8` | 이 값 이상으로 Fable 창을 쓴 계정을 비-Fable 요청에 우선 배정. `1`이면 모델 인식 라우팅 비활성화. |
 | `display.hidden` | — | 선택. `v` 메뉴에서 끈 대시보드 항목, 예: `["section:codex", "activity"]`. 표시 전용. |
 | `proxy.legacyPorts` | — | 선택. 프로바이더별로 계속 응답할 추가 포트 — 예: `{ "claude": [3400] }`. |
+| `sync.role` | — | 선택. `"follower"` 로 두면 이 기기가 다른 기기의 로그인을 따라간다(아래 참고). |
+| `sync.peer` | — | 리더의 ssh 대상. `~/.ssh/config` 별칭도 된다. |
+| `sync.providers` | `["claude"]` | 로그인을 따라갈 제공자. |
+| `sync.intervalMs` | `120000` | 리더의 credentials 를 읽는 주기. |
+| `sync.failoverAfterMs` | `0` | 리더에 이만큼 닿지 않고 토큰이 곧 만료되면 여기서 직접 갱신한다. 그 토큰은 리더가 돌아오면 되돌려 준다. `0` 이면 끈다. |
+| `sync.node` | `node` | 되돌려 줄 때 리더에서 쓸 `node`(비로그인 ssh 는 `PATH` 가 짧다). |
+| `sync.path` | `~/.config/teamai/credentials.json` | 리더의 credentials 파일. |
 
 다른 프로세스가 포트를 이미 점유하고 있다면 포트를 바꾸세요. 기동 실패의 가장 흔한 원인이며, 이유는 `server-start.log`에 남습니다.
 
 클라이언트는 기동 시점에 베이스 URL을 전달받고 이후에는 재지정할 수 없으므로, `config.json`에서 포트를 옮기면 이미 열려 있던 모든 세션이 connection refused로 끊길 수 있습니다. 그래서 릴레이는 내장 기본 포트와 사용자가 나열한 `proxy.legacyPorts`에도 함께 응답해, 포트를 바꿔도 열린 세션이 살아 있게 합니다. 다른 프로세스가 이미 점유한 레거시 포트는 메인 포트에 영향을 주지 않고 건너뛰며, 기동 이후 발생한 소켓 오류는 릴레이를 죽이지 않고 로그로만 남깁니다.
+
+### 두 기기에서 같은 계정 쓰기
+
+Claude 갱신 토큰은 그것을 대체하는 갱신 한 번에 소진된다. `credentials.json` 을 다른 기기로 복사하면 두 기기가 서로를 로그아웃시킨다 — 먼저 갱신한 쪽만 살고 다른 쪽은 "re-login needed" 가 된다. 기기마다 따로 로그인하거나(`teamai login` 은 매번 독립된 로그인을 만든다) 한 기기가 다른 기기를 따라가게 한다.
+
+```json
+"sync": { "role": "follower", "peer": "my-laptop", "failoverAfterMs": 1800000 }
+```
+
+팔로워는 리더도 가진 계정을 직접 갱신하지 않는다. `sync.intervalMs` 마다 `ssh <peer>`(키 인증, 비대화식)로 리더의 `credentials.json` 을 읽어 자기 것보다 만료가 늦은 토큰을 채택하므로, 리더에서 한 번만 다시 로그인하면 두 기기 모두 풀린다. 팔로워에만 있는 계정은 평소처럼 갱신하고, 방금 401 을 받은 토큰은 만료 전처럼 보여도 다시 쓰지 않는다.
+
+`sync.failoverAfterMs` 를 두면, 리더에 그만큼 닿지 않을 때(ssh 연결 자체가 실패) 팔로워가 곧 만료될 토큰을 직접 갱신하고, 다시 닿으면 더 새 토큰을 리더의 `credentials.json` 에 되돌려 넣는다. 리더는 이를 채택하고 갱신 직전마다 자기 파일을 다시 읽으므로, 팔로워가 이미 쓴 갱신 토큰을 다시 쓰지 않는다. 리더가 보통 닿는 환경이면 끄는 편이 낫다 — 깨어 있지만 팔로워와만 끊긴 리더는 같은 갱신 토큰을 두고 경합한다.
 
 ## 범위와 준수 사항
 

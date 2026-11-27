@@ -112,10 +112,14 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     }
     let response: Response;
     let phase = 'token refresh';
+    // The token this attempt is sent with — what a 401 refuses (a follower must
+    // not be handed it back; see AccountPool.refresh).
+    let sentToken = '';
     try {
       await pool.refresh(account);
       phase = 'upstream';
       const headers = pool.provider.buildHeaders(incomingHeaders(req), account);
+      sentToken = account.credential.accessToken;
       const sendBody = pool.provider.rewriteBody(body, account);
       headers.set('content-length', String(sendBody.length));
       // AbortSignal.timeout(300_000) used to sit here, and it kept running
@@ -160,7 +164,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       if (decision.kind === 'auth' && !authRetried) {
         authRetried = true;
         let outcome = 'auth refresh';
-        try { await pool.refresh(account, true); } catch (error) { outcome = pool.recordRefreshFailure(account, error) === 'unreachable' ? 'auth refresh unreachable; retrying' : 'auth refresh refused — re-login needed'; excluded.add(account.id); }
+        try { await pool.refresh(account, true, sentToken); } catch (error) { outcome = pool.recordRefreshFailure(account, error) === 'unreachable' ? 'auth refresh unreachable; retrying' : 'auth refresh refused — re-login needed'; excluded.add(account.id); }
         onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${outcome}`); continue;
       }
       if (decision.kind === 'quota' || decision.kind === 'model-quota') pool.commitProbeFromQuotaRejection(path, incomingHeaders(req), body, response.headers);

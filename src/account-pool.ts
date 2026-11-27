@@ -1,4 +1,5 @@
 import { subscriptionHealthy, type LiveAccountStatus, type OAuthCredential, type PersistedState, type ProbeTemplate, type Provider, type QuotaSnapshot, type RefreshErrorKind, type RefreshSweep, type RuntimeAccount, type Shortfall, type StoredAccount } from './types.js';
+import type { Puller } from './sync.js';
 
 // An empty exclusion set, for judging an account on its own merits rather than
 // on what one request has already tried.
@@ -31,6 +32,22 @@ export class AccountPool {
   readonly maxWarmupTries = 3;
   private refreshes = new Map<string, Promise<void>>();
   private sweepInFlight = false;
+  // Set on a follower: accounts the leader also holds are renewed by reading the
+  // leader's token instead of refreshing here (see sync.ts for why).
+  private leader: Puller | null = null;
+  // Ids the leader held at the last successful read; null until one succeeds.
+  private leaderHolds: Set<string> | null = null;
+  // Per account, the access token upstream last answered 401 to. It is never
+  // handed back as usable, however live its expiry says it is.
+  private refusedTokens = new Map<string, string>();
+  private failoverAfterMs = 0;
+  private failovers = 0;
+  // A failover refresh upstream refused is not retried on the same refresh
+  // token for an hour — the leader may be alive and holding the newer one.
+  private failoverRefusedUntil = new Map<string, number>();
+  // The credentials file, re-read right before a refresh and after a refused one
+  // (set by runtime.ts). See renew().
+  private credentialSource: (() => Promise<Record<string, OAuthCredential>>) | null = null;
   private usageRead: Promise<unknown> | null = null;
 
   // Accounts still holding Fable budget are kept for Fable. An account measured
@@ -414,15 +431,133 @@ export class AccountPool {
     return kind;
   }
 
-  async refresh(account: RuntimeAccount, force = false): Promise<void> {
+  followLeader(puller: Puller | null, failoverAfterMs = 0): void { this.leader = puller; this.failoverAfterMs = failoverAfterMs; }
+
+  // How many tokens were refreshed here by failover since the last call.
+  takeFailovers(): number { const n = this.failovers; this.failovers = 0; return n; }
+
+  // Ours that expire later than the leader's copy — only a failover makes one.
+  // The leader must get them back, since our refresh spent its refresh token.
+  newerThanLeader(latest: Record<string, OAuthCredential>): Record<string, OAuthCredential> {
+    const out: Record<string, OAuthCredential> = {};
+    for (const account of this.accounts) {
+      const theirs = latest[account.credentialId]; const ours = account.credential;
+      if (theirs && ours.expiresAt !== null && ours.expiresAt > (theirs.expiresAt ?? 0)) out[account.credentialId] = ours;
+    }
+    return out;
+  }
+
+  // The leader has been out of reach for long enough, and this token is lapsing
+  // or was refused: refresh it here rather than stop serving.
+  private failoverDue(account: RuntimeAccount, leader: Puller): boolean {
+    const since = leader.downSince?.() ?? null;
+    if (!this.failoverAfterMs || since === null || Date.now() - since < this.failoverAfterMs || !account.credential.refreshToken) return false;
+    if ((this.failoverRefusedUntil.get(account.id) ?? 0) > Date.now()) return false;
+    const lapsing = account.credential.expiresAt === null || account.credential.expiresAt < Date.now() + 5 * 60_000;
+    return lapsing || !this.usable(account);
+  }
+
+  // `refusedToken` is the token a request just got 401 for (proxy.ts). Only a
+  // follower uses it; a leader refreshes whatever it holds, as before.
+  async refresh(account: RuntimeAccount, force = false, refusedToken?: string): Promise<void> {
     if (!force && account.credential.expiresAt && account.credential.expiresAt > Date.now() + 5 * 60_000) return;
+    if (this.leader && refusedToken) this.refusedTokens.set(account.id, refusedToken);
     const existing = this.refreshes.get(account.id);
     if (existing) return existing;
-    // A new token does not lift an organization's OAuth block: only an answer does.
-    const promise = this.provider.refresh(account.credential).then((next) => { account.credential = next; if (account.errorKind !== 'blocked') AccountPool.clearError(account); }).finally(() => this.refreshes.delete(account.id));
+    const promise = (this.leader ? this.renewFromLeader(account, this.leader) : this.renew(account)).finally(() => this.refreshes.delete(account.id));
     this.refreshes.set(account.id, promise);
     return promise;
   }
+
+  readCredentialsFrom(source: (() => Promise<Record<string, OAuthCredential>>) | null): void { this.credentialSource = source; }
+
+  // A new token does not lift an organization's OAuth block: only an answer does.
+  //
+  // The credentials file is checked first and again after a refusal: another
+  // writer — a re-login, or a follower pushing back a token it refreshed while
+  // this machine was away (sync.ts failover) — may already hold a newer token
+  // made from the refresh token we are about to spend. Using that one instead
+  // avoids a needless 400 "re-login needed" on wake-up.
+  private async renew(account: RuntimeAccount): Promise<void> {
+    if (await this.adoptFromDisk(account)) return;
+    let next: OAuthCredential;
+    try {
+      next = await this.provider.refresh(account.credential);
+    } catch (error) {
+      if (!isUnreachable(error) && await this.adoptFromDisk(account)) return;
+      throw error;
+    }
+    account.credential = next; if (account.errorKind !== 'blocked') AccountPool.clearError(account);
+  }
+
+  // Adopt this account's on-disk token when it is newer than ours and not about
+  // to lapse itself. Organization blocks survive, as in adoptFromLeader.
+  private async adoptFromDisk(account: RuntimeAccount): Promise<boolean> {
+    if (!this.credentialSource) return false;
+    let all: Record<string, OAuthCredential>;
+    try { all = await this.credentialSource(); } catch { return false; }
+    const fresh = all[account.credentialId];
+    if (!fresh || fresh.expiresAt === null || fresh.expiresAt <= Date.now() + 5 * 60_000) return false;
+    if (account.credential.expiresAt !== null && fresh.expiresAt <= account.credential.expiresAt) return false;
+    return this.adoptKeepingBlocks({ [account.credentialId]: fresh }) > 0;
+  }
+
+  // Adopt the leader's tokens (those expiring later than ours) and remember which
+  // accounts it holds. Unlike a local re-login, a routine token rotation on the
+  // leader must not lift an organization's OAuth block here.
+  adoptFromLeader(latest: Record<string, OAuthCredential>): number {
+    this.leaderHolds = new Set(Object.keys(latest));
+    return this.adoptKeepingBlocks(latest);
+  }
+
+  private adoptKeepingBlocks(latest: Record<string, OAuthCredential>): number {
+    const blocked = new Map(this.accounts.filter((a) => a.errorKind === 'blocked').map((a) => [a.id, a.error] as const));
+    const adopted = this.adoptCredentials(latest);
+    for (const account of this.accounts) {
+      const error = blocked.get(account.id);
+      if (error !== undefined) { account.error = error; account.errorKind = 'blocked'; }
+    }
+    return adopted;
+  }
+
+  // Usable = not expired, and not the token upstream just refused.
+  private usable(account: RuntimeAccount): boolean {
+    const refused = this.refusedTokens.get(account.id);
+    if (refused !== undefined && refused !== account.credential.accessToken) this.refusedTokens.delete(account.id);
+    const live = account.credential.expiresAt !== null && account.credential.expiresAt > Date.now();
+    return live && account.credential.accessToken !== this.refusedTokens.get(account.id);
+  }
+
+  // Follower path: never refresh what the leader also holds — that would spend
+  // the refresh token the leader still uses. Adopt the leader's newer token if
+  // there is one; keep ours while it is usable; otherwise bench the account as
+  // unreachable so the quick retry looks again shortly. An account the leader
+  // has never held is ours alone and is refreshed here, leader or no leader.
+  private async renewFromLeader(account: RuntimeAccount, leader: Puller): Promise<void> {
+    let latest: Record<string, OAuthCredential>;
+    try {
+      latest = await leader();
+    } catch (error) {
+      if (this.leaderHolds && !this.leaderHolds.has(account.credentialId)) return this.renew(account);
+      if (this.failoverDue(account, leader)) {
+        try {
+          await this.renew(account); this.refusedTokens.delete(account.id); this.failovers++; return;
+        } catch (refusal) {
+          if (!isUnreachable(refusal)) this.failoverRefusedUntil.set(account.id, Date.now() + 60 * 60_000);
+          if (this.usable(account)) { this.clearUnlessBlocked(account); return; }
+          throw refusal;
+        }
+      }
+      if (this.usable(account)) { this.clearUnlessBlocked(account); return; }
+      throw error;
+    }
+    if (!(account.credentialId in latest)) { this.leaderHolds = new Set(Object.keys(latest)); return this.renew(account); }
+    this.adoptFromLeader(latest);
+    if (this.usable(account)) { this.clearUnlessBlocked(account); return; }
+    throw Object.assign(new Error('leader has no newer token yet'), { name: 'TimeoutError' });
+  }
+
+  private clearUnlessBlocked(account: RuntimeAccount): void { if (account.errorKind !== 'blocked') AccountPool.clearError(account); }
 
   // Keep idle accounts' refresh-token chains rotating. Ordinary traffic sticks
   // to a few accounts and warm-up deliberately never refreshes, so an account

@@ -347,6 +347,13 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `fableReserveThreshold` | `0.8` | Uso de la ventana Fable a partir del cual la cuenta se prefiere para solicitudes que no son Fable. `1` desactiva el enrutamiento según el modelo. |
 | `display.hidden` | — | Opcional. Partes del panel desactivadas desde el menú `v`, p. ej. `["section:codex", "activity"]`. Solo visual. |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
+| `sync.role` | — | Opcional. `"follower"` hace que esta máquina siga las sesiones de otra (ver abajo). |
+| `sync.peer` | — | Destino ssh del líder; sirve un alias de `~/.ssh/config`. |
+| `sync.providers` | `["claude"]` | Proveedores cuyas sesiones se siguen. |
+| `sync.intervalMs` | `120000` | Cada cuánto se leen las credenciales del líder. |
+| `sync.failoverAfterMs` | `0` | Si el líder lleva este tiempo inalcanzable y un token está por vencer, se refresca aquí; el token vuelve al líder cuando regresa. `0` lo desactiva. |
+| `sync.node` | `node` | `node` en el líder para devolver el token (un ssh sin login tiene un `PATH` corto). |
+| `sync.path` | `~/.config/teamai/credentials.json` | Archivo de credenciales del líder. |
 
 Cambia un puerto si otro proceso ya lo ocupa: esa es la causa habitual de un
 arranque fallido, y el motivo aparece en `server-start.log`.
@@ -359,6 +366,18 @@ también responde en el puerto por defecto integrado y en cualquier
 cambiar de puerto. Un puerto heredado que ya esté ocupado por otro proceso se
 omite sin afectar al puerto principal, y un error de socket posterior al
 arranque se registra en lugar de dejar que tumbe el relé.
+
+### Usar las mismas cuentas en dos máquinas
+
+Un refresh token de Claude se consume con el refresco que lo reemplaza. Si copias `credentials.json` a otra máquina, las dos se cierran la sesión mutuamente: gana la que refresca primero y la otra queda en "re-login needed". Inicia sesión por separado en cada máquina —cada `teamai login` es una sesión independiente— o haz que una siga a la otra:
+
+```json
+"sync": { "role": "follower", "peer": "my-laptop", "failoverAfterMs": 1800000 }
+```
+
+El seguidor nunca refresca una cuenta que el líder también tiene. Cada `sync.intervalMs` lee el `credentials.json` del líder por `ssh <peer>` (con clave, no interactivo) y adopta cualquier token que venza más tarde que el suyo, así que basta con volver a iniciar sesión una vez en el líder. Las cuentas que solo tiene el seguidor se refrescan como siempre, y un token al que upstream acaba de responder 401 no se reutiliza aunque parezca vigente.
+
+Con `sync.failoverAfterMs`, si el líder lleva ese tiempo inalcanzable (ssh no logra conectar), el seguidor refresca él mismo un token por vencer y, al volver a alcanzarlo, escribe el token más nuevo en el `credentials.json` del líder. El líder lo adopta y relee su archivo justo antes de cada refresco, así que no gasta el refresh token que el seguidor ya usó. Déjalo desactivado si el líder suele estar alcanzable: un líder despierto pero aislado del seguidor competiría por el mismo refresh token.
 
 ## Alcance y cumplimiento
 

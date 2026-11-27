@@ -366,6 +366,13 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `fableReserveThreshold` | `0.8` | Fable-window usage at or above which an account is preferred for non-Fable requests. `1` turns model-aware routing off. |
 | `display.hidden` | — | Optional. Dashboard parts switched off from the `v` menu, e.g. `["section:codex", "activity"]`. Display only. |
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
+| `sync.role` | — | Optional. `"follower"` makes this machine follow another machine's logins (see below). |
+| `sync.peer` | — | ssh destination of the leader, e.g. a `~/.ssh/config` alias. |
+| `sync.providers` | `["claude"]` | Providers whose logins are followed. |
+| `sync.intervalMs` | `120000` | How often the leader's credentials are read. |
+| `sync.failoverAfterMs` | `0` | Refresh here anyway once the leader has been unreachable this long and a token is about to lapse; the token goes back to the leader when it returns. `0` disables failover. |
+| `sync.node` | `node` | `node` on the leader, used for that push-back (a non-login ssh has a short `PATH`). |
+| `sync.path` | `~/.config/teamai/credentials.json` | The leader's credentials file. |
 
 Change a port if something else already owns it — that is the usual cause of a
 failed start, and the reason appears in `server-start.log`.
@@ -377,6 +384,18 @@ default port and any `proxy.legacyPorts` you list, keeping open sessions alive
 across a port change. A legacy port that something else already owns is skipped
 without affecting the main port, and a socket error after startup is logged
 rather than allowed to take the relay down.
+
+### Using the same accounts on two machines
+
+A Claude refresh token is spent by the refresh that replaces it. Copy `credentials.json` to a second machine and the two keep signing each other out: whichever refreshes first wins, and the other is left with "re-login needed". Either sign in on each machine separately — every `teamai login` is an independent login — or let one machine follow the other:
+
+```json
+"sync": { "role": "follower", "peer": "my-laptop", "failoverAfterMs": 1800000 }
+```
+
+A follower never refreshes an account its leader also holds. Every `sync.intervalMs` it reads the leader's `credentials.json` over `ssh <peer>` (key-based, non-interactive) and adopts any token that expires later than its own, so signing in again once on the leader is enough for both machines. Accounts only the follower holds refresh as usual, and a token upstream just answered 401 to is never handed back while it still looks unexpired.
+
+With `sync.failoverAfterMs` set, a follower whose leader has been unreachable — ssh could not connect at all — for that long refreshes a lapsing token itself, and writes the newer token back into the leader's `credentials.json` once it can reach it again. The leader adopts it, and re-reads its own file right before any refresh, so it does not spend the refresh token the follower already used. Leave failover off when the leader is normally reachable: a leader that is awake but cut off from the follower would race it for the same refresh token.
 
 ## Scope and compliance
 

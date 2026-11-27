@@ -293,10 +293,29 @@ curl -s -m 1 -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" "http://127.0.0.1:
 | `fableReserveThreshold` | `0.8` | 当账号的 Fable 窗口用量达到或超过该值时，优先把非 Fable 请求分给它。设为 1 关闭模型感知路由。 |
 | `display.hidden` | — | 可选。在 `v` 菜单中关闭的仪表盘项目，例如 `["section:codex", "activity"]`。仅影响显示。 |
 | `proxy.legacyPorts` | — | 可选。按提供方继续应答的额外端口 — 例如 { "claude": [3400] }。 |
+| `sync.role` | — | 可选。设为 `"follower"` 时，本机跟随另一台机器的登录（见下文）。 |
+| `sync.peer` | — | leader 的 ssh 目标，可用 `~/.ssh/config` 别名。 |
+| `sync.providers` | `["claude"]` | 跟随登录的提供方。 |
+| `sync.intervalMs` | `120000` | 读取 leader 凭据的间隔。 |
+| `sync.failoverAfterMs` | `0` | leader 无法连接达到此时长且令牌即将过期时，在本机刷新；leader 恢复后把令牌交还给它。`0` 表示关闭。 |
+| `sync.node` | `node` | 交还令牌时 leader 上使用的 `node`（非登录 ssh 的 `PATH` 很短）。 |
+| `sync.path` | `~/.config/teamai/credentials.json` | leader 的凭据文件。 |
 
 如果某个端口已被别的程序占用，请改掉它——这正是启动失败最常见的原因，具体原因会记录在 `server-start.log` 中。
 
 客户端的 base URL 是在启动时一次性交给它的，之后无法再重定向，因此若在 `config.json` 里改动端口，本会让每个已经打开的会话都陷入连接被拒。为此中继还会在内置的默认端口以及你在 `proxy.legacyPorts` 中列出的任意端口上应答，从而在端口变更时让已打开的会话保持存活。若某个旧端口已被别的程序占用，则会被跳过，并不影响主端口；而启动之后发生的套接字错误只会被记录下来，不会被放任而拖垮整个中继。
+
+### 在两台机器上使用同一批账号
+
+Claude 的 refresh token 会在替换它的那次刷新中被用掉。把 `credentials.json` 复制到另一台机器，两台机器会互相把对方登出——先刷新的一方留下，另一方变成 "re-login needed"。要么在每台机器上分别登录（每次 `teamai login` 都是独立的登录），要么让一台机器跟随另一台：
+
+```json
+"sync": { "role": "follower", "peer": "my-laptop", "failoverAfterMs": 1800000 }
+```
+
+follower 从不刷新 leader 也持有的账号。它每隔 `sync.intervalMs` 通过 `ssh <peer>`（密钥认证、非交互）读取 leader 的 `credentials.json`，采用比自己过期更晚的令牌，因此只需在 leader 上重新登录一次，两台机器就都恢复了。只有 follower 持有的账号照常刷新；上游刚返回 401 的令牌即使看起来未过期也不会再用。
+
+设置 `sync.failoverAfterMs` 后，若 leader 无法连接（ssh 根本连不上）达到该时长，follower 会自行刷新即将过期的令牌，并在重新连上时把更新的令牌写回 leader 的 `credentials.json`。leader 会采用它，并在每次刷新前重读自己的文件，因此不会再用 follower 已经用掉的 refresh token。若 leader 通常可以连接，建议保持关闭——醒着但与 follower 断开的 leader 会与它争用同一个 refresh token。
 
 ## 适用范围与合规
 

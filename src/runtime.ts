@@ -8,6 +8,7 @@ import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, providerPort, readCredentialsText, saveCredentialsIfUnchanged, saveState } from './storage.js';
 import { PROVIDER_IDS, type OAuthCredential, type PersistedState, type ProviderId, type RefreshSweep, type TeamAIConfig } from './types.js';
 import { buildUsageReport, requestUrl, serveUsage } from './usage.js';
+import { DEFAULT_FAILOVER_AFTER_MS, DEFAULT_SYNC_INTERVAL_MS, followedProviders, sshPuller, sshPusher, type OAuthRecords } from './sync.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
 const DRAIN_MS = 5_000;
@@ -51,6 +52,13 @@ export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
   const pools = PROVIDER_IDS.map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
+  // A follower renews the accounts its leader also holds by reading the leader's
+  // token rather than refreshing here (sync.ts). Its own-only accounts refresh as before.
+  const followed = followedProviders(config.sync);
+  const leader = followed.length ? sshPuller(config.sync!) : null;
+  const failoverAfterMs = config.sync?.failoverAfterMs ?? DEFAULT_FAILOVER_AFTER_MS;
+  if (leader) for (const pool of pools) if (followed.includes(pool.provider.id)) pool.followLeader(leader, failoverAfterMs);
+  for (const pool of pools) pool.readCredentialsFrom(loadCredentials);
   let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200); const notices = [...(state.notices || [])].slice(-NOTICE_LIMIT);
   // Every save first adopts any credential the TUI wrote since (a re-login),
   // then writes memory back — so a fresh token is picked up within a save
@@ -188,6 +196,44 @@ export async function runServer(): Promise<void> {
   // fleet still adopts a re-login (see persistNow) within five minutes.
   const refreshLapsed = async (): Promise<void> => report(await Promise.all(pools.map((pool) => pool.refreshLapsed())));
   setImmediate(() => void refreshLapsed()); const lapsedTimer = setInterval(() => void refreshLapsed(), 5 * 60_000); lapsedTimer.unref();
+  // Follower: pull the leader's tokens on a short cycle so a token the leader
+  // refreshed (or a re-login done there) is adopted well before ours lapses.
+  // Losing the leader for half an hour is a notice; so is getting it back.
+  if (leader) {
+    const peer = config.sync!.peer; const intervalMs = config.sync!.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
+    const alarmAfter = Math.max(1, Math.ceil(30 * 60_000 / intervalMs)); let failures = 0;
+    const push = sshPusher(config.sync!);
+    const followers = pools.filter((p) => followed.includes(p.provider.id)); let pushFailures = 0;
+    const pullLeader = async (): Promise<void> => {
+      const failedOver = followers.reduce((n, p) => n + p.takeFailovers(), 0);
+      if (failedOver) persist(`Failover: refreshed ${failedOver} token(s) here — ${peer} unreachable; they go back to it when it returns`, true);
+      try {
+        const latest = await leader();
+        // Before adopting: a failover token of ours is newer than the leader's,
+        // and the leader's own refresh token is spent — it needs ours back.
+        const newer: OAuthRecords = Object.assign({}, ...followers.map((p) => p.newerThanLeader(latest)));
+        const adopted = followers.reduce((n, p) => n + p.adoptFromLeader(latest), 0);
+        if (failures >= alarmAfter) persist(`Leader ${peer} reachable again`, true);
+        failures = 0;
+        if (adopted) persist(`Followed ${adopted} token(s) from ${peer}`);
+        if (Object.keys(newer).length) {
+          try { const taken = await push(newer); persist(`Pushed ${taken}/${Object.keys(newer).length} newer token(s) back to ${peer}`, true); }
+          catch (error) {
+            // A notice on the first failure and then every half hour, not every cycle.
+            pushFailures++;
+            const hint = /command not found|ssh exit 127/.test((error as Error).message) ? ' (set sync.node to node’s full path on the leader)' : '';
+            persist(`Push back to ${peer} failed: ${(error as Error).message}${hint} — retrying`, pushFailures === 1 || pushFailures % alarmAfter === 0);
+            return;
+          }
+          pushFailures = 0;
+        }
+      } catch (error) {
+        failures++;
+        if (failures === alarmAfter) persist(`${(error as Error).message} — not followed for ${AccountPool.formatDuration(failures * intervalMs)}`, true);
+      }
+    };
+    setImmediate(() => void pullLeader()); const syncTimer = setInterval(() => void pullLeader(), intervalMs); syncTimer.unref();
+  }
   // Local control channel: the TUI runs in a separate process, so a fleet-wide
   // quota re-measure (R) has to reach the pools living here. Bound to the proxy
   // host and gated by the same client token as the proxies.

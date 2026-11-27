@@ -1,3 +1,4 @@
+import type { SyncConfig } from './sync.js';
 // Every provider the relay fronts, in display order.
 export const PROVIDER_IDS = ['claude', 'codex', 'grok'] as const;
 export type ProviderId = typeof PROVIDER_IDS[number];
@@ -62,6 +63,8 @@ export interface TeamAIConfig {
   fableReserveThreshold?: number;
   // Dashboard parts the user switched off; display only, routing ignores it.
   display?: { hidden?: DisplayItem[] };
+  // Follow another machine's logins instead of refreshing them here (sync.ts).
+  sync?: SyncConfig;
   accounts: StoredAccount[];
 }
 
